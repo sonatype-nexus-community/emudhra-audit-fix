@@ -62,6 +62,7 @@ that page as of 2026-10-22; check the page for updates.
 ./emudhra-audit-fix.sh -vv          # also show the probe commands and raw TLS errors
 ./emudhra-audit-fix.sh --fix --dry-run  # show exactly what a fix would do; change nothing
 ./emudhra-audit-fix.sh --undo --dry-run # show which backups --undo would restore
+./emudhra-audit-fix.sh --fix --dry-run --only=node  # preview upgrading an nvm-managed Node.js
 ```
 
 No installation is needed. The script is a single file; make it executable with `chmod +x emudhra-audit-fix.sh` if required.
@@ -187,7 +188,8 @@ Prefer upgrading over the workaround. The workaround removes two widely used roo
 `emSign ECC Root CA - G3`) from the trust store, which can break legitimate sites that chain to them, and an OS update may
 replace the edited file. Java and Electron apps use their own trust lists, so OS-level workarounds do not help them; they
 need an upgrade. Node.js uses its own bundled list by default; the script tests `--use-system-ca` and says whether it helps
-on your machine.
+on your machine. For a Node.js installed with nvm, `--fix --only=node` can do the upgrade for you (see
+[Node.js via nvm](#nodejs-via-nvm---onlynode)).
 
 If no fixed JDK build is available yet, the guidance for a Java install also prints a stop-gap: back up that JDK's
 `cacerts` and delete the entries for the two roots. It makes Java reject sites chained to those roots, and is undone by
