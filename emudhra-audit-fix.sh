@@ -71,7 +71,7 @@ Fix options (these can modify the system; sudo is used where needed):
   --yes             with --fix: do not ask before each change
   --workaround-only with --fix: skip the vendor package upgrade on Linux and go straight
                     to blocking the two roots
-  --only=KIND       with --fix: apply only one kind of fix: brew, sys, java, macpip, node or uv
+  --only=KIND       with --fix: apply only one kind of fix: brew, sys, java, macpip, node, uv or rustup
   --undo            restore the backups made by --fix (asks first; honours --dry-run/--yes)
 
   -h, --help        show this help
@@ -98,7 +98,7 @@ done
 if [ "$UNDO" -eq 1 ] && [ "$FIXMODE" -eq 1 ] && [ "$DRY" -eq 0 ]; then
   echo "--undo cannot be combined with --fix" >&2; exit 2
 fi
-case $ONLY in ""|brew|sys|java|macpip|node|uv) ;; *) echo "--only must be one of: brew, sys, java, macpip, node, uv" >&2; exit 2 ;; esac
+case $ONLY in ""|brew|sys|java|macpip|node|uv|rustup) ;; *) echo "--only must be one of: brew, sys, java, macpip, node, uv, rustup" >&2; exit 2 ;; esac
 if [ "$YES" -eq 1 ] && [ "$FIXMODE" -eq 0 ] && [ "$UNDO" -eq 0 ]; then
   echo "--yes only makes sense with --fix or --undo" >&2; exit 2
 fi
@@ -134,6 +134,7 @@ PYBIN=
 PROBE_RES=
 NODE_SYSCA_RES=
 UV_FIXED=0.13.4         # first uv release with the fix
+RUSTUP_FIXED=1.29.2     # first rustup release with the fix
 JAVA_PROBE_OK=0         # 1 once a Java probe class has been compiled
 PLAN=$'\n'              # fixes this script can apply: kind|target lines (see plan_add)
 
@@ -1266,10 +1267,14 @@ audit_simple() {
       upg=$(uv_upgrade_cmd "$(uv_install_method "$b")")
       plan_add uv "$b"
     fi
+    if [ "$VC" = behind ] && [ "$name" = rustup ]; then
+      upg=$(rustup_upgrade_cmd "$(rustup_install_method "$b")")
+      plan_add rustup "$b"
+    fi
     if [ "$VC" = behind ]; then
       fixc "$upg"
       fix "Upgrade $label to $fixed or later: $upg"
-      [ "$name" = rustup ] && fix "Also check Rust projects: Cargo.lock should resolve rustls-webpki >= 0.103.16 and webpki-roots >= 1.0.10 (cargo update -p rustls-webpki -p webpki-roots)."
+      [ "$name" = rustup ] && fix "Also check Rust projects: Cargo.lock should resolve rustls-webpki >= 0.103.16 and webpki-roots >= 1.0.10 (cargo update -p rustls-webpki -p webpki-roots). Upgrading rustup does not do this."
     fi
     report "$label" "$b" "${v:-?}" "$VC" "$VN" "skipped:no safe way to probe this tool's own TLS - version check only"
   done <<EOF
@@ -1309,6 +1314,29 @@ uv_upgrade_cmd() {
     mise)  echo "mise use -g uv@latest   (mise manages this uv)" ;;
     asdf)  echo "asdf install uv latest && asdf global uv latest" ;;
     *)     echo "uv self update   (standalone install), or your package manager: brew upgrade uv / pipx upgrade uv" ;;
+  esac
+}
+
+# rustup_install_method BIN : official | brew | system | unknown. `rustup self update` only works for a rustup put
+# in place by the official rustup-init, which lives in $CARGO_HOME/bin (default ~/.cargo/bin).
+rustup_install_method() {
+  local b=$1 r ch
+  r=$(resolve "$b"); ch=${CARGO_HOME:-$HOME/.cargo}
+  case $b$r in
+    */Cellar/*|/opt/homebrew/*|/usr/local/opt/*|*/.linuxbrew/*) echo brew; return ;;
+    /usr/bin/*|/bin/*|/usr/sbin/*|/usr/local/bin/*|/snap/*) echo system; return ;;
+  esac
+  case $b in "$ch"/bin/*) echo official; return ;; esac
+  echo unknown
+}
+
+# rustup_upgrade_cmd METHOD : the right upgrade command for how rustup was installed.
+rustup_upgrade_cmd() {
+  case $1 in
+    official) echo "rustup self update" ;;
+    brew)     echo "brew upgrade rustup" ;;
+    system)   echo "your package manager (apt/dnf/pacman/apk upgrade rustup)" ;;
+    *)        echo "rustup self update   (official install), or your package manager: brew upgrade rustup" ;;
   esac
 }
 
@@ -2406,6 +2434,45 @@ fix_uv() {
   fx_say "Note: this upgrades uv only. Python versions and tools that uv manages (uv python / uv tool) are not upgraded."
 }
 
+# ---- rustup (official rustup-init install only)
+# fix_rustup RUSTUP_BIN : `rustup self update` for an official install; for any other install method print the right
+# command and change nothing. The binary is copied first and put back if rustup stops responding.
+fix_rustup() {
+  local b=$1 how cmd oldv newv bak
+  how=$(rustup_install_method "$b"); cmd=$(rustup_upgrade_cmd "$how")
+  oldv=$(version_of rustup "$b")
+  fx_say "${C_BLD}rustup${C_OFF}  $b  ($oldv, install method: $how)"
+  if [ "$how" != official ]; then
+    fx_warn "this rustup was not installed by rustup-init, so 'rustup self update' is not used. Run: $cmd"
+    SKIPPED_N=$((SKIPPED_N + 1)); return
+  fi
+  if [ "$DRY" -eq 1 ]; then
+    fx_cmd "$b self update"
+    fx_say "[dry-run] would then re-read 'rustup --version' and compare it with $RUSTUP_FIXED; nothing is changed now"
+    return
+  fi
+  confirm "Upgrade rustup with '$b self update'?" || { fx_say "skipped"; SKIPPED_N=$((SKIPPED_N + 1)); return; }
+  bak="$TMP/rustup.bak"
+  cp -p "$b" "$bak" || { fx_bad "could not back up $b - nothing was changed"; FAILED_N=$((FAILED_N + 1)); return; }
+  fx_cmd "$b self update"
+  "$b" self update </dev/null 2>&1 | sed 's/^/      /' | tail -6
+  newv=$(version_of rustup "$b")
+  if [ -z "$newv" ]; then
+    fx_bad "rustup no longer reports a version - restoring the previous binary. If it is still broken, reinstall with rustup-init (https://rustup.rs)"
+    cp -p "$bak" "$b"; FAILED_N=$((FAILED_N + 1)); return
+  fi
+  if ver_ge "$newv" "$RUSTUP_FIXED"; then
+    fx_ok "rustup --version now reports $newv (fixed in $RUSTUP_FIXED). This is a version check, not a TLS probe."
+    FIXED_N=$((FIXED_N + 1))
+    FIX_NOTES="${FIX_NOTES}  - rustup: $oldv -> $newv"$'\n'
+  else
+    fx_bad "rustup reports $newv, still behind $RUSTUP_FIXED (the update may not have happened) - the binary still works"
+    FAILED_N=$((FAILED_N + 1))
+  fi
+  fx_say "Note: this upgrades rustup only. Rust toolchains are not updated (rustup update), and Rust projects still need"
+  fx_say "rustls-webpki >= 0.103.16 and webpki-roots >= 1.0.10 in Cargo.lock (cargo update -p rustls-webpki -p webpki-roots)."
+}
+
 # ---- orchestration
 run_fixes() {
   local line kind target ran=0
@@ -2426,7 +2493,7 @@ run_fixes() {
   # for everything run inside the loop (brew, keytool, prompts), which is how confirm() once lost its terminal.
   local oldifs=$IFS
   IFS=$'\n'
-  for kind in brew sys java macpip node uv; do
+  for kind in brew sys java macpip node uv rustup; do
     for line in $PLAN; do
       IFS=$oldifs
       case $line in "$kind|"*) ;; *) IFS=$'\n'; continue ;; esac
@@ -2440,6 +2507,7 @@ run_fixes() {
         macpip) fix_macos_pip ;;
         node)   fix_node_nvm "$target" ;;
         uv)     fix_uv "$target" ;;
+        rustup) fix_rustup "$target" ;;
       esac
       IFS=$'\n'
     done
@@ -2546,7 +2614,7 @@ want java   && audit_java
 want node   && audit_node
 want deno   && audit_deno
 want bun    && audit_bun
-want rustup && audit_simple "rustup" rustup 1.29.2 "rustup self update   (or: brew upgrade rustup)" "$HOME/.cargo/bin/rustup"
+want rustup && audit_simple "rustup" rustup 1.29.2 "rustup self update   (or: brew upgrade rustup)" "${CARGO_HOME:-$HOME/.cargo}/bin/rustup"
 want uv     && audit_simple "uv" uv 0.13.4 "uv self update   (or: brew upgrade uv / pipx upgrade uv)" "$HOME/.local/bin/uv $HOME/.cargo/bin/uv"
 want pixi   && audit_simple "pixi" pixi 0.82.1 "pixi self-update   (or: brew upgrade pixi)" "$HOME/.pixi/bin/pixi"
 want mise   && audit_simple "mise" mise 2026.10.17 "mise self-update   (or: brew upgrade mise)" "$HOME/.local/bin/mise"

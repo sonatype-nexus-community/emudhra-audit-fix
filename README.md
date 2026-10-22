@@ -64,6 +64,7 @@ that page as of 2026-10-22; check the page for updates.
 ./emudhra-audit-fix.sh --undo --dry-run # show which backups --undo would restore
 ./emudhra-audit-fix.sh --fix --dry-run --only=node  # preview upgrading an nvm-managed Node.js
 ./emudhra-audit-fix.sh --fix --dry-run --only=uv    # preview upgrading a standalone uv
+./emudhra-audit-fix.sh --fix --dry-run --only=rustup # preview `rustup self update`
 ```
 
 No installation is needed. The script is a single file; make it executable with `chmod +x emudhra-audit-fix.sh` if required.
@@ -96,7 +97,7 @@ protected, and lists the old version under "upgrade when convenient".
 | Node.js | yes (and again with `--use-system-ca` when affected) | yes | Fixed in 22.23.4, 24.22.1, 26.12.1. `--fix --only=node` can upgrade nvm installs; see [Node.js via nvm](#nodejs-via-nvm---onlynode). |
 | Deno | yes | yes | Fixed in 2.9.8. |
 | Bun | yes | no | The page lists the fix as pending. |
-| rustup | no | yes | Fixed in 1.29.2. |
+| rustup | no | yes | Fixed in 1.29.2. `--fix --only=rustup` upgrades an official install; see [rustup](#rustup-official-install---onlyrustup). |
 | uv | no | yes | Fixed in 0.13.4. `--fix --only=uv` upgrades a standalone install; see [uv](#uv-standalone-install---onlyuv). |
 | pixi | no | yes | Fixed in 0.82.1. |
 | mise | no | yes | Fixed in 2026.10.17. |
@@ -160,7 +161,7 @@ At the end there is a summary count, followed by the remediation guidance.
 | `--fix` | After the audit, offer to apply fixes, asking before each change. See [Applying fixes](#applying-fixes---fix). |
 | `--dry-run` | With `--fix`: run every check and show every step, but change nothing. |
 | `--yes` | With `--fix` or `--undo`: do not ask the ordinary y/N questions (for unattended use). It **never** answers the `I AGREE` prompt that guards deleting a Node.js version. |
-| `--only=KIND` | With `--fix`: apply one kind of fix only: `brew`, `sys`, `java`, `macpip`, `node` or `uv`. |
+| `--only=KIND` | With `--fix`: apply one kind of fix only: `brew`, `sys`, `java`, `macpip`, `node`, `uv` or `rustup`. |
 | `--workaround-only` | With `--fix`: skip mention of the vendor package upgrade on Linux. |
 | `--undo` | Restore the backups made by `--fix`. |
 | `-h`, `--help` | Show usage. |
@@ -216,6 +217,7 @@ release exists; the fixes here distrust two roots, which has side effects.
 | `macpip` | Appends the page's `PIP_CERT` line to Apple's Python `sitecustomize.py`. | yes |
 | `node` | Upgrades a Node.js installed with **nvm** to the fixed release for its own major line (see below). An upgrade, not a trust-store edit. | no |
 | `uv` | Runs `uv self update` for a **standalone** uv install (see below). An upgrade, not a trust-store edit. | no |
+| `rustup` | Runs `rustup self update` for a rustup installed by the official `rustup-init` (see below). An upgrade, not a trust-store edit. | no |
 
 The two roots are `AAA Certificate Services` (Comodo/Sectigo) and `emSign ECC Root CA - G3`. Nothing else is removed. The
 script refuses to proceed if a change would remove more than expected.
@@ -264,6 +266,19 @@ For a uv behind 0.13.4, `--fix` first works out **how uv was installed**: the st
 - Afterwards it re-reads `uv --version` and compares it with 0.13.4. This is a **version check, not a TLS probe**. If uv
   no longer reports a version, the previous binary is restored.
 - Upgrading uv does not upgrade the Python versions or tools it manages (`uv python`, `uv tool`).
+
+### rustup, official install (`--only=rustup`)
+
+For a rustup behind 1.29.2, `--fix` first works out how it was installed. Only a rustup in `$CARGO_HOME/bin` (default
+`~/.cargo/bin`, so a `CARGO_HOME` override is honoured) counts as an official `rustup-init` install.
+
+- **Official:** after a `y/N` prompt (`--yes` skips it), it runs `rustup self update`. `--dry-run` only prints the command.
+- **Homebrew, a distribution package or unknown:** `self update` is **never** run. The right command is printed
+  (`brew upgrade rustup`, or your package manager) and the item counts as skipped.
+- Afterwards it re-reads `rustup --version` and compares it with 1.29.2. This is a **version check, not a TLS probe**.
+  If rustup stops responding, the previous binary is restored and the output points at reinstalling with `rustup-init`.
+- This does **not** update Rust toolchains, and does not fix Rust projects: `Cargo.lock` still needs
+  `rustls-webpki >= 0.103.16` and `webpki-roots >= 1.0.10` (`cargo update -p rustls-webpki -p webpki-roots`).
 
 ### Safeguards
 
@@ -382,6 +397,7 @@ tests/test_strip_roots.sh [BUNDLE]        # root-stripping logic against a real 
 tests/test_confirm_prompt.sh              # --fix prompt under a real pseudo-terminal, using a throwaway JDK copy
 tests/test_fix_node.sh                    # --fix --only=node against a stub nvm (no network, ~8s, never touches ~/.nvm)
 tests/test_fix_uv.sh                      # --fix --only=uv against a stub uv binary (no network, throwaway HOME)
+tests/test_fix_rustup.sh                  # --fix --only=rustup against a stub rustup binary (no network, throwaway HOME)
 tests/test_linux_containers.sh [IMAGE...] # --fix and --undo cycles in throwaway Linux containers (needs Docker)
 ```
 
