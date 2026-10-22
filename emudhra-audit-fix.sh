@@ -33,7 +33,7 @@
 # Exit status: 0 = nothing affected, 1 = at least one tool affected/likely
 # affected, 2 = usage error.
 
-VERSION_OF_SCRIPT=0.6.0
+VERSION_OF_SCRIPT=0.7.0
 
 BAD_URLS="https://dv-g3b-emudhra.we-have-a-problem.com/ https://dv-g3b-aaa-emudhra.we-have-a-problem.com/"
 # The control host must NOT chain to either root the advisory says to distrust, or a correctly
