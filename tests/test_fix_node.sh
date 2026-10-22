@@ -11,6 +11,8 @@
 #   6. no fix         - a major line with no published fix is refused, not guessed
 #   7. not published  - a fixed release nvm does not offer yet is refused
 #   8. dry run        - prints the commands and changes nothing
+#   9. removal gate   - the old version is only removed after typing exactly "I AGREE"; "y", "yes", "i agree",
+#                       empty input and --yes do not remove it; a default or aliased version is kept
 #
 # The fake node answers --version and acts as the TLS probe target by printing "rejected" lines when it is the
 # fixed version, "trusted" lines otherwise, so the post-install verification is exercised too.
@@ -24,7 +26,15 @@ W=$(mktemp -d "${TMPDIR:-/tmp}/emudhra-node.XXXXXX") || exit 2
 trap 'chmod -R u+w "$W" 2>/dev/null; rm -rf "$W"' EXIT
 
 fails=0
-check() { if [ "$2" -eq 0 ]; then echo "  ok   $1"; else echo "  FAIL $1"; fails=$((fails + 1)); fi; }
+# On failure, show what the script printed in this scenario (set \$out) so the cause is visible, not just the symptom.
+check() {
+  if [ "$2" -eq 0 ]; then echo "  ok   $1"; return; fi
+  echo "  FAIL $1"; fails=$((fails + 1))
+  if [ -n "${DEBUG_FAILS:-}" ]; then
+    printf '%s\n' "${out:-}" | sed -n '/Node.js (nvm)/,$p' | head -30 | sed 's/^/        | /'
+    printf '        | nvm calls: %s\n' "$(calls | tr '\n' ';')"
+  fi
+}
 yes_if() { if "$@"; then echo 0; else echo 1; fi; }
 
 # make_fake_node DIR VERSION RESULT : a "node" that reports VERSION and mimics the TLS probe.
@@ -62,17 +72,24 @@ EOF
 #   REMOTE=<ver>                    what `nvm version-remote <major>` returns
 #   DEFAULT=<ver>                   what `nvm version default` returns
 #   INSTALL=ok|nothing              whether `nvm install` actually installs
+#   EXTRA="v24.10.0 ..."            additional older versions to install alongside
+#   ALIASES="name:vX name2:vY"      aliases `nvm alias` should report (resolved targets)
+#   UNINSTALL=ok|fail               whether `nvm uninstall` really removes the directory
 new_env() {
-  local old=$1
+  local old=$1 x
   NVM="$W/nvm"; rm -rf "$NVM"; mkdir -p "$NVM/versions/node"
   make_fake_node "$NVM/versions/node/v$old" "$old" trusted
+  for x in ${EXTRA:-}; do make_fake_node "$NVM/versions/node/$x" "${x#v}" trusted; done
   cat > "$NVM/nvm.sh" <<EOF
 # stub nvm: records calls in \$NVM_DIR/calls.log
 nvm() {
   echo "nvm \$*" >> "\$NVM_DIR/calls.log"
   case "\$1" in
     version-remote) echo "v${REMOTE:-24.22.1}" ;;
-    version)        [ "\$2" = default ] && echo "v${DEFAULT:-$old}" ;;
+    version)
+      if [ "\$2" = default ]; then
+        if [ -s "\$NVM_DIR/default.state" ]; then cat "\$NVM_DIR/default.state"; else echo "v${DEFAULT:-$old}"; fi
+      fi ;;
     install)
       [ "${INSTALL:-ok}" = nothing ] && return 1
       v=\${2#v}
@@ -81,7 +98,14 @@ nvm() {
       cp "\$NVM_DIR/versions/node/v$old/bin/node" "\$d/bin/node"
       printf '%s\n' "\$v" > "\$d/bin/version"
       printf '%s\n' "${FIXED_RESULT:-rejected}" > "\$d/bin/verdict" ;;
-    alias) echo "alias \$2 \$3" >> "\$NVM_DIR/aliases.log" ;;
+    alias)
+      if [ -n "\$2" ]; then
+        echo "alias \$2 \$3" >> "\$NVM_DIR/aliases.log"
+        [ "\$2" = default ] && echo "\$3" > "\$NVM_DIR/default.state"
+      else for a in ${ALIASES:-}; do echo "\${a%%:*} -> x (-> \${a#*:})"; done; fi ;;
+    uninstall)
+      [ "${UNINSTALL:-ok}" = fail ] && return 1
+      rm -rf "\$NVM_DIR/versions/node/\$2" ;;
   esac
 }
 EOF
@@ -94,17 +118,19 @@ import os, pty, re, select, sys, time
 script, nvm, answers = sys.argv[1], sys.argv[2], sys.argv[3:]
 pid, fd = pty.fork()
 if pid == 0:
-    env = dict(os.environ, NVM_DIR=nvm, EMUDHRA_NODE_BINS=nvm + "/versions/node")
-    os.execve("/bin/bash", ["/bin/bash", script, "--fix", "--only=node"], env)
+    env = dict(os.environ, NVM_DIR=nvm, EMUDHRA_NODE_BINS=nvm + "/versions/node", EMUDHRA_AUDIT_ONLY="node")
+    extra = os.environ.get("RUN_EXTRA_ARGS", "").split()
+    os.execve("/bin/bash", ["/bin/bash", script, "--fix", "--only=node"] + extra, env)
 out = b""; sent = 0; deadline = time.time() + 300
 while time.time() < deadline:
-    r, _, _ = select.select([fd], [], [], 1)
+    r, _, _ = select.select([fd], [], [], 0.05)
     if fd in r:
         try: chunk = os.read(fd, 4096)
         except OSError: break
         if not chunk: break
         out += chunk
-        while out.count(b"[y/N]") > sent:
+        # answer each prompt in order: the [y/N] questions and the "Type I AGREE" removal gate
+        while out.count(b"[y/N]") + out.count(b"anything else cancels:") > sent:
             os.write(fd, (answers[sent] if sent < len(answers) else "n").encode() + b"\n"); sent += 1
     else:
         try:
@@ -115,7 +141,7 @@ PY
 }
 
 run_plain() {  # ARGS... : run with no terminal (for --dry-run)
-  NVM_DIR="$NVM" EMUDHRA_NODE_BINS="$NVM/versions/node" /bin/bash "$SCRIPT" "$@" </dev/null 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
+  NVM_DIR="$NVM" EMUDHRA_NODE_BINS="$NVM/versions/node" EMUDHRA_AUDIT_ONLY=node /bin/bash "$SCRIPT" "$@" </dev/null 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
 }
 
 calls() { cat "$NVM/calls.log" 2>/dev/null; }
@@ -123,14 +149,14 @@ installed() { [ -x "$NVM/versions/node/v$1/bin/node" ]; }
 
 echo "1. happy path: 24.16.0 -> 24.22.1, default is the old version, answer y to both prompts"
 FIXED_RESULT=rejected REMOTE=24.22.1 DEFAULT=24.16.0 INSTALL=ok new_env 24.16.0
-out=$(run_pty y y)
+out=$(run_pty y y n)
 check "planned a Node fix" $(yes_if grep -q 'Node.js (nvm)' <<<"$out")
 check "ran nvm install v24.22.1 with --reinstall-packages-from" $(yes_if grep -q 'nvm install v24.22.1 --reinstall-packages-from=24.16.0\|install v24.22.1 --reinstall-packages-from=v24.16.0' <<<"$(calls)")
 check "fixed version is installed beside the old one" $(yes_if installed 24.22.1)
 check "old version is still installed" $(yes_if installed 24.16.0)
 check "verified the new binary" $(yes_if grep -q 'verified:' <<<"$out")
 check "switched the default alias" $(yes_if grep -q 'alias default v24.22.1' "$NVM/aliases.log")
-check "never ran nvm uninstall" $(yes_if test -z "$(calls | grep uninstall)")
+check "declined removal: nvm uninstall was not run" $(yes_if test -z "$(calls | grep uninstall)")
 check "reported Changed: 1" $(yes_if grep -q 'Changed: 1 ' <<<"$out")
 
 echo "2. decline the install prompt"
@@ -191,12 +217,99 @@ check "fix_node_nvm itself refuses a major with no fix" $(yes_if grep -q 'no fix
 check "it never asked to install anything" $(yes_if test -z "$(grep ASKED <<<"$direct")")
 check "it ran no nvm install" $(yes_if test -z "$(calls | grep '^nvm install')")
 
-echo "9. dry run"
+echo "10. removal: typing exactly I AGREE removes the old version (and only that one)"
+FIXED_RESULT=rejected REMOTE=24.22.1 DEFAULT=24.16.0 ALIASES="default:v24.22.1" new_env 24.16.0
+out=$(run_pty y y "I AGREE")
+check "warned about the impact" $(yes_if grep -q 'permanently deletes Node.js v24.16.0' <<<"$out")
+check "listed the consequences (pins, global packages, cannot be undone)" $(yes_if grep -q '.nvmrc' <<<"$out")
+check "ran nvm uninstall v24.16.0" $(yes_if grep -q '^nvm uninstall v24.16.0' <<<"$(calls)")
+check "the old version is gone" $(yes_if test ! -d "$NVM/versions/node/v24.16.0")
+check "the fixed version is still there" $(yes_if installed 24.22.1)
+check "recorded how to reinstall" $(yes_if grep -q 'reinstall with: nvm install v24.16.0' <<<"$out")
+
+echo "11. removal: anything other than exactly I AGREE keeps it"
+for ans in "y" "yes" "Y" "i agree" "I agree" "I AGREE " " I AGREE" "I  AGREE" ""; do
+  FIXED_RESULT=rejected REMOTE=24.22.1 DEFAULT=24.16.0 ALIASES="default:v24.22.1" new_env 24.16.0
+  out=$(run_pty y y "$ans")
+  check "answer [$ans] does not remove it" $(yes_if test -d "$NVM/versions/node/v24.16.0")
+  check "answer [$ans]: no uninstall was run" $(yes_if test -z "$(calls | grep '^nvm uninstall')")
+done
+
+echo "12. removal: --yes alone must never remove anything"
+FIXED_RESULT=rejected REMOTE=24.22.1 DEFAULT=24.16.0 ALIASES="default:v24.22.1" new_env 24.16.0
+out=$(RUN_EXTRA_ARGS="--yes" run_pty)
+check "--yes installed the fixed version" $(yes_if installed 24.22.1)
+check "--yes did not remove the old version" $(yes_if test -d "$NVM/versions/node/v24.16.0")
+check "no nvm uninstall was run" $(yes_if test -z "$(calls | grep '^nvm uninstall')")
+
+echo "13. removal: with no terminal, nothing is removed"
+FIXED_RESULT=rejected REMOTE=24.22.1 DEFAULT=24.16.0 ALIASES="default:v24.22.1" new_env 24.16.0
+out=$(python3 -I - "$SCRIPT" "$NVM" <<'PY'
+import os, re, subprocess, sys
+os.setsid()
+env = dict(os.environ, NVM_DIR=sys.argv[2], EMUDHRA_NODE_BINS=sys.argv[2] + "/versions/node", EMUDHRA_AUDIT_ONLY="node")
+r = subprocess.run(["/bin/bash", sys.argv[1], "--fix", "--yes", "--only=node"], stdin=subprocess.DEVNULL,
+                   capture_output=True, text=True, env=env)
+print(re.sub(r"\x1b\[[0-9;]*m", "", r.stdout + r.stderr))
+PY
+)
+check "installed under --yes" $(yes_if installed 24.22.1)
+check "said it will not remove without a terminal" $(yes_if grep -q 'not removing anything' <<<"$out")
+check "the old version is still there" $(yes_if test -d "$NVM/versions/node/v24.16.0")
+
+echo "14. removal: the default and aliased versions are kept, with the reason"
+FIXED_RESULT=rejected REMOTE=24.22.1 DEFAULT=24.16.0 ALIASES="default:v24.16.0 work:v24.16.0" new_env 24.16.0
+out=$(run_pty y n "I AGREE")          # decline switching the default, so the old one stays the default
+check "kept it because it is the default" $(yes_if grep -q 'keeping v24.16.0: it is your nvm default' <<<"$out")
+check "named the aliases pointing at it" $(yes_if grep -q 'aliases point at it' <<<"$out")
+check "no removal prompt was shown" $(yes_if test "$(grep -c 'Type I AGREE' <<<"$out")" -eq 0)
+check "the old version is still there" $(yes_if test -d "$NVM/versions/node/v24.16.0")
+FIXED_RESULT=rejected REMOTE=24.22.1 DEFAULT=22.0.0 ALIASES="work:v24.16.0" new_env 24.16.0
+out=$(run_pty y "I AGREE")
+check "an alias alone keeps it (default is elsewhere)" $(yes_if test -d "$NVM/versions/node/v24.16.0")
+check "said which alias" $(yes_if grep -q 'aliases point at it: work' <<<"$out")
+
+echo "15. two old versions on one major line: ONE upgrade, a separate prompt for each old version"
+FIXED_RESULT=rejected REMOTE=24.22.1 DEFAULT=22.0.0 ALIASES="default:v22.0.0" EXTRA="v24.10.0" new_env 24.16.0
+out=$(run_pty y "I AGREE" n)
+installs=$(grep -c '^nvm install' <<<"$(calls)")
+prompts=$(grep -c 'Type I AGREE' <<<"$out")
+check "upgraded once, not once per old version ($installs install)" $(yes_if test "$installs" -eq 1)
+# The install count alone is weak: a second per-binary pass finds the fixed version already installed and does not
+# install again. So also count how many times the Node section is opened, and how often "Use the already-installed"
+# is asked, which only happens on a redundant second pass.
+sections=$(grep -c 'Node.js (nvm)' <<<"$out")
+check "the Node fix ran as one section ($sections), not one per old binary" $(yes_if test "$sections" -eq 1)
+check "no redundant 'use the already-installed' question" $(yes_if test "$(grep -c 'already-installed' <<<"$out")" -eq 0)
+check "asked once per old version ($prompts prompts)" $(yes_if test "$prompts" -eq 2)
+check "agreeing for one did not remove the other" $(yes_if test "$(ls "$NVM/versions/node" | grep -c '^v24\.')" -eq 2)
+check "the fixed version is still there" $(yes_if installed 24.22.1)
+check "exactly one old version was removed" $(yes_if test "$(grep -c '^nvm uninstall' <<<"$(calls)")" -eq 1)
+check "never offered the fixed version" $(yes_if test -z "$(grep 'nvm uninstall v24.22.1' <<<"$out")")
+
+echo "16. removal: a failed uninstall is reported, not claimed"
+FIXED_RESULT=rejected REMOTE=24.22.1 DEFAULT=24.16.0 ALIASES="default:v24.22.1" UNINSTALL=fail new_env 24.16.0
+out=$(run_pty y y "I AGREE")
+check "reported it could not remove" $(yes_if grep -q 'could not remove v24.16.0' <<<"$out")
+check "did not claim success" $(yes_if test -z "$(grep 'removed v24.16.0' <<<"$out")")
+
+echo "17. removal: never offered after a failed install or a failed verification"
+INSTALL=nothing REMOTE=24.22.1 DEFAULT=24.16.0 new_env 24.16.0
+out=$(run_pty y y "I AGREE")
+check "failed install: no removal prompt" $(yes_if test "$(grep -c 'Type I AGREE' <<<"$out")" -eq 0)
+FIXED_RESULT=trusted REMOTE=24.22.1 DEFAULT=24.16.0 new_env 24.16.0
+out=$(run_pty y y "I AGREE")
+check "failed verification: no removal prompt" $(yes_if test "$(grep -c 'Type I AGREE' <<<"$out")" -eq 0)
+check "failed verification: old version still there" $(yes_if test -d "$NVM/versions/node/v24.16.0")
+
+echo "18. dry run"
 FIXED_RESULT=rejected REMOTE=24.22.1 DEFAULT=24.16.0 new_env 24.16.0
 out=$(run_plain --fix --dry-run --only=node)
 check "prints the install command" $(yes_if grep -q 'nvm install v24.22.1 --reinstall-packages-from=v24.16.0' <<<"$out")
 check "installs nothing" $(yes_if test ! -x "$NVM/versions/node/v24.22.1/bin/node")
 check "no nvm install was run" $(yes_if test -z "$(calls | grep '^nvm install')")
+check "no nvm uninstall was run" $(yes_if test -z "$(calls | grep '^nvm uninstall')")
+check "says removal would be gated" $(yes_if grep -q 'type-I-AGREE' <<<"$out")
 
 echo
 if [ "$fails" -eq 0 ]; then echo "all checks passed"; exit 0; fi

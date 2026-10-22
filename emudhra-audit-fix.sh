@@ -1194,7 +1194,10 @@ audit_node() {
     if [ "${nres%%:*}" = trusted ] || [ "$VC" = behind ] || [ "$VC" = nofix ]; then
       fix_node "$n"
       # --fix can upgrade Node when it came from nvm and the major line has a published fix
-      if [ "$(where_from "$n")" = nvm ] && [ "$VC" = behind ]; then plan_add node "$n"; fi
+      # One plan entry per major line, not per binary: a single run installs the fixed release once and then
+      # offers every older version of that line for removal. Planning each old binary separately would repeat
+      # the whole upgrade (and its prompts) once per version.
+      if [ "$(where_from "$n")" = nvm ] && [ "$VC" = behind ]; then plan_node_major "$n"; fi
     fi
     report "Node.js" "$n" "${v:-?}" "$VC" "$VN" "$nres" "$extra"
   done <<EOF
@@ -1718,7 +1721,23 @@ confirm() {
   case $a in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
 }
 
-# need_sudo PATH : sets SUDO to "sudo" if PATH (or its directory) is not writable by us.
+# confirm_agree WARNING-TEXT : for destructive steps. Prints the warning, then requires the user to type exactly
+# "I AGREE" on the controlling terminal. Unlike confirm(), --yes NEVER answers this, "y"/"yes"/"i agree" are all
+# refused, end-of-input is refused, and with no terminal the answer is no.
+confirm_agree() {
+  local a=
+  if ! { : </dev/tty; } 2>/dev/null; then
+    fx_warn "no terminal to ask on - not removing anything (--yes does not answer this prompt)"
+    return 1
+  fi
+  printf '%s\n' "$1" >/dev/tty
+  printf '  Type I AGREE to continue, anything else cancels: ' >/dev/tty
+  # IFS= and no word splitting: plain `read -r` would strip leading/trailing spaces, so " I AGREE" would pass.
+  IFS= read -r a </dev/tty || return 1
+  [ "$a" = "I AGREE" ]
+}
+
+# need_sudo PATH : sets SUDO to "sudo" if PATH (or its directory) is not writable by us. to "sudo" if PATH (or its directory) is not writable by us.
 need_sudo() {
   local t=$1
   [ -e "$t" ] || t=$(dirname "$t")
@@ -2103,6 +2122,29 @@ nvm_run() {   # nvm ARGS... : run `nvm ARGS` in a clean subshell; output on stdo
   ( export NVM_DIR="$d"; . "$d/nvm.sh" >/dev/null 2>&1; nvm "$@" ) </dev/null
 }
 
+# plan_node_major NODE_BIN : schedule one nvm upgrade per major line, targeting the newest installed binary of
+# that major (the closest to the fixed release, so --reinstall-packages-from copies the most relevant packages).
+plan_node_major() {
+  local n=$1 v major best entry
+  v=$("$n" --version 2>/dev/null </dev/null); v=${v#v}; major=${v%%.*}
+  # already planned for this major? keep the newer of the two
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    best=$("$entry" --version 2>/dev/null </dev/null); best=${best#v}
+    if [ "${best%%.*}" = "$major" ]; then
+      if ver_ge "$v" "$best" && [ "$v" != "$best" ]; then
+        # replace the older entry with this newer one (PLAN is newline-separated "kind|target" lines)
+        PLAN=$(printf '%s\n' "$PLAN" | grep -v -F -x "node|$entry")$'\n'
+        plan_add node "$n"
+      fi
+      return 0
+    fi
+  done <<EOF3
+$(printf '%s\n' "$PLAN" | grep '^node|' | cut -d'|' -f2-)
+EOF3
+  plan_add node "$n"
+}
+
 # node_fixed_for NODE_BIN : the fixed version for this Node's major line, or empty if none is published.
 node_fixed_for() {
   local v major
@@ -2146,7 +2188,8 @@ fix_node_nvm() {
   if [ "$DRY" -eq 1 ]; then
     [ -x "$newbin" ] || fx_cmd "nvm install v$fixed --reinstall-packages-from=$oldv"
     fx_cmd "# then, only if $oldv is your current default: nvm alias default v$fixed   (asked separately)"
-    fx_say "[dry-run] the old version $oldv is never uninstalled; to remove it later: nvm uninstall $oldv"
+    fx_say "[dry-run] afterwards, each older v${fixed%%.*}.x that is not your default or aliased would be offered for removal"
+    fx_say "[dry-run] behind a type-I-AGREE prompt that --yes cannot answer (nvm uninstall $oldv); nothing is removed now"
     return
   fi
 
@@ -2184,7 +2227,79 @@ fix_node_nvm() {
     fx_say "your nvm default is ${cur_default:-unset}, not $oldv - not changing it"
   fi
   FIXED_N=$((FIXED_N + 1))
-  FIX_NOTES="${FIX_NOTES}  - Node.js: installed v$fixed beside $oldv (remove the old one when ready: nvm uninstall $oldv)"$'\n'
+  FIX_NOTES="${FIX_NOTES}  - Node.js: installed v$fixed beside $oldv"$'\n'
+
+  # Last, and only after a verified upgrade: offer to remove the old, affected version(s). Each is a separate,
+  # strongly worded prompt that --yes can never answer.
+  offer_node_removal "$fixed"
+}
+
+# nvm_aliases_for VERSION : names of every nvm alias that resolves to VERSION (e.g. v24.16.0), one per line.
+# Asks nvm itself, because aliases chain (default -> lts/* -> lts/krypton -> v24.16.0).
+nvm_aliases_for() {
+  nvm_run alias 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' |
+    awk -v v="$1" '{ name=$1; if (index($0, "(-> " v ")") || index($0, "(-> " v " ")) print name }'
+}
+
+# nvm_removable_versions FIXED : old versions of the same major that are safe to OFFER for removal, as
+# "<version>|<reason>" lines. reason is empty when removal may be offered, otherwise why it is being kept.
+nvm_removable_versions() {
+  local fixed=$1 major dir d v def reasons
+  major=${fixed%%.*}
+  dir="$(nvm_dir)/versions/node"
+  def=$(nvm_run version default 2>/dev/null | tail -1)
+  for d in "$dir"/v"$major".*; do
+    [ -d "$d" ] || continue
+    v=${d##*/}; v=${v#v}
+    ver_ge "$v" "$fixed" && continue            # the fixed version, or newer: never offered
+    reasons=
+    [ "v$v" = "$def" ] && reasons="it is your nvm default"
+    al=$(nvm_aliases_for "v$v" | tr '\n' ' ')
+    [ -n "${al// /}" ] && reasons="${reasons:+$reasons; }aliases point at it: $al"
+    echo "$v|$reasons"
+  done
+}
+
+# offer_node_removal FIXED : after a verified upgrade, offer to remove older same-major versions, one at a time,
+# each behind the I AGREE gate. Never runs under --dry-run, never with --yes alone.
+offer_node_removal() {
+  local fixed=$1 line v reason n=0 removed=0
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    v=${line%%|*}; reason=${line#*|}
+    n=$((n + 1))
+    if [ -n "$reason" ]; then
+      fx_say "keeping v$v: $reason"
+      continue
+    fi
+    if confirm_agree "
+  ${C_YEL}WARNING: this permanently deletes Node.js v$v from nvm.${C_OFF}
+
+  Before you continue, be aware that:
+    - it is the version with the compromised-chain problem, so removing it is the safest end state, BUT
+    - any project that pins it (an .nvmrc, .node-version, engines field, a CI script or a shell alias) will
+      stop working until it is pointed at v$fixed or newer;
+    - global npm packages installed only under v$v are deleted with it (the upgrade copied them to v$fixed);
+    - running processes and shells currently using v$v keep running, but new shells will not find it;
+    - this cannot be undone except by reinstalling it: nvm install v$v   (a reinstall brings the problem back).
+
+  Command that will run: nvm uninstall v$v"; then
+      fx_cmd "nvm uninstall v$v"
+      if nvm_run uninstall "v$v" >/dev/null 2>&1 && [ ! -d "$(nvm_dir)/versions/node/v$v" ]; then
+        fx_ok "removed v$v"
+        removed=$((removed + 1))
+        FIX_NOTES="${FIX_NOTES}  - Node.js: removed v$v (reinstall with: nvm install v$v)"$'\n'
+      else
+        fx_bad "nvm could not remove v$v; it is still installed"
+      fi
+    else
+      fx_say "kept v$v (nothing typed, or not exactly I AGREE)"
+    fi
+  done <<EOF2
+$(nvm_removable_versions "$fixed")
+EOF2
+  [ "$n" -eq 0 ] && fx_say "no older v${fixed%%.*}.x versions are installed, so there is nothing to remove"
+  return 0
 }
 
 # node_probe_bin NODE_BIN : TLS verdict (trusted | rejected | inconclusive:...) for one Node binary.
@@ -2321,24 +2436,28 @@ if [ "$UNDO" -eq 1 ]; then
   exit 0
 fi
 
+# Testing aid: EMUDHRA_AUDIT_ONLY=node (or curl, git, go, python, java, ...) runs just that one audit, so tests of a
+# single fix do not wait for every other tool to be probed over the network. Unset, everything runs.
+want() { [ -z "${EMUDHRA_AUDIT_ONLY:-}" ] || [ "$EMUDHRA_AUDIT_ONLY" = "$1" ]; }
+
 audit_env
-audit_curl
-audit_git
-audit_go
-audit_python
-audit_java
-audit_node
-audit_deno
-audit_bun
-audit_simple "rustup" rustup 1.29.2 "rustup self update   (or: brew upgrade rustup)" "$HOME/.cargo/bin/rustup"
-audit_simple "uv" uv 0.13.4 "uv self update   (or: brew upgrade uv / pipx upgrade uv)" "$HOME/.local/bin/uv $HOME/.cargo/bin/uv"
-audit_simple "pixi" pixi 0.82.1 "pixi self-update   (or: brew upgrade pixi)" "$HOME/.pixi/bin/pixi"
-audit_simple "mise" mise 2026.10.17 "mise self-update   (or: brew upgrade mise)" "$HOME/.local/bin/mise"
-audit_simple "Claude Code" claude 2.1.303 "claude update" "$HOME/.local/bin/claude $HOME/.claude/local/claude"
-audit_brew
-audit_sysbundle
-audit_ospkg
-audit_electron
+want curl   && audit_curl
+want git    && audit_git
+want go     && audit_go
+want python && audit_python
+want java   && audit_java
+want node   && audit_node
+want deno   && audit_deno
+want bun    && audit_bun
+want rustup && audit_simple "rustup" rustup 1.29.2 "rustup self update   (or: brew upgrade rustup)" "$HOME/.cargo/bin/rustup"
+want uv     && audit_simple "uv" uv 0.13.4 "uv self update   (or: brew upgrade uv / pipx upgrade uv)" "$HOME/.local/bin/uv $HOME/.cargo/bin/uv"
+want pixi   && audit_simple "pixi" pixi 0.82.1 "pixi self-update   (or: brew upgrade pixi)" "$HOME/.pixi/bin/pixi"
+want mise   && audit_simple "mise" mise 2026.10.17 "mise self-update   (or: brew upgrade mise)" "$HOME/.local/bin/mise"
+want claude && audit_simple "Claude Code" claude 2.1.303 "claude update" "$HOME/.local/bin/claude $HOME/.claude/local/claude"
+want brew   && audit_brew
+want sys    && audit_sysbundle
+want ospkg  && audit_ospkg
+want electron && audit_electron
 
 if [ "$VERBOSE" -ge 1 ]; then
   section "Summary"
