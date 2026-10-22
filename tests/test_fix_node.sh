@@ -13,6 +13,8 @@
 #   8. dry run        - prints the commands and changes nothing
 #   9. removal gate   - the old version is only removed after typing exactly "I AGREE"; "y", "yes", "i agree",
 #                       empty input and --yes do not remove it; a default or aliased version is kept
+#  19. active version - real nvm refuses to uninstall the currently-active version; the script must deactivate
+#                       in its own subshell first, show nvm's message if it still fails, and never claim success
 #
 # The fake node answers --version and acts as the TLS probe target by printing "rejected" lines when it is the
 # fixed version, "trusted" lines otherwise, so the post-install verification is exercised too.
@@ -75,6 +77,9 @@ EOF
 #   EXTRA="v24.10.0 ..."            additional older versions to install alongside
 #   ALIASES="name:vX name2:vY"      aliases `nvm alias` should report (resolved targets)
 #   UNINSTALL=ok|fail               whether `nvm uninstall` really removes the directory
+#   ACTIVE=vX.Y.Z                   the version real nvm would consider active in the shell (it refuses to
+#                                   uninstall that one until `nvm deactivate` has run); unset = nothing active
+#   DEACTIVATE=works|broken         whether `nvm deactivate` clears the active version
 new_env() {
   local old=$1 x
   NVM="$W/nvm"; rm -rf "$NVM"; mkdir -p "$NVM/versions/node"
@@ -103,8 +108,15 @@ nvm() {
         echo "alias \$2 \$3" >> "\$NVM_DIR/aliases.log"
         [ "\$2" = default ] && echo "\$3" > "\$NVM_DIR/default.state"
       else for a in ${ALIASES:-}; do echo "\${a%%:*} -> x (-> \${a#*:})"; done; fi ;;
+    deactivate)
+      [ "${DEACTIVATE:-works}" = works ] && ACTIVE_NOW=""
+      return 0 ;;
     uninstall)
-      [ "${UNINSTALL:-ok}" = fail ] && return 1
+      if [ -n "\${ACTIVE_NOW-${ACTIVE:-}}" ] && [ "\${ACTIVE_NOW-${ACTIVE:-}}" = "\$2" ]; then
+        echo "nvm: Cannot uninstall currently-active node version, \$2 (inferred from \$2)." >&2
+        return 1
+      fi
+      [ "${UNINSTALL:-ok}" = fail ] && { echo "nvm: stub could not remove \$2" >&2; return 1; }
       rm -rf "\$NVM_DIR/versions/node/\$2" ;;
   esac
 }
@@ -301,6 +313,26 @@ FIXED_RESULT=trusted REMOTE=24.22.1 DEFAULT=24.16.0 new_env 24.16.0
 out=$(run_pty y y "I AGREE")
 check "failed verification: no removal prompt" $(yes_if test "$(grep -c 'Type I AGREE' <<<"$out")" -eq 0)
 check "failed verification: old version still there" $(yes_if test -d "$NVM/versions/node/v24.16.0")
+
+echo "19. removal: nvm refuses to uninstall the currently-active version"
+# This is the real-world case: the shell the script was started from still has the old version active.
+FIXED_RESULT=rejected REMOTE=24.22.1 DEFAULT=24.16.0 ALIASES="default:v24.22.1" ACTIVE=v24.16.0 new_env 24.16.0
+out=$(run_pty y y "I AGREE")
+check "removed the old version even though it was active in the calling shell" $(yes_if test ! -d "$NVM/versions/node/v24.16.0")
+check "ran nvm deactivate before uninstalling" $(yes_if grep -q '^nvm deactivate' <<<"$(calls)")
+check "deactivated BEFORE the uninstall" $(yes_if test "$(calls | grep -n -E '^nvm (deactivate|uninstall)' | head -1 | grep -c deactivate)" -eq 1)
+check "reported success" $(yes_if grep -q 'removed v24.16.0' <<<"$out")
+
+FIXED_RESULT=rejected REMOTE=24.22.1 DEFAULT=24.16.0 ALIASES="default:v24.22.1" ACTIVE=v24.16.0 DEACTIVATE=broken new_env 24.16.0
+out=$(run_pty y y "I AGREE")
+check "if deactivate does not help, it is still there" $(yes_if test -d "$NVM/versions/node/v24.16.0")
+check "shows nvm's own message, not just 'could not remove'" $(yes_if grep -q 'Cannot uninstall currently-active' <<<"$out")
+check "tells the user how to finish it themselves" $(yes_if grep -q 'open a NEW shell' <<<"$out")
+check "does not claim it removed it" $(yes_if test -z "$(grep 'removed v24.16.0' <<<"$out")")
+
+FIXED_RESULT=rejected REMOTE=24.22.1 DEFAULT=24.16.0 ALIASES="default:v24.22.1" UNINSTALL=fail new_env 24.16.0
+out=$(run_pty y y "I AGREE")
+check "any other uninstall failure also shows nvm's message" $(yes_if grep -q 'stub could not remove' <<<"$out")
 
 echo "18. dry run"
 FIXED_RESULT=rejected REMOTE=24.22.1 DEFAULT=24.16.0 new_env 24.16.0

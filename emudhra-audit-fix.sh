@@ -2145,6 +2145,20 @@ EOF3
   plan_add node "$n"
 }
 
+# nvm_run_seq CMD1... -- CMD2... : run two nvm commands in order in ONE subshell, so state set by the first (for
+# example `nvm deactivate` clearing the active version from PATH) is seen by the second. Stops at the first failure
+# of the second command only; the first is best-effort because deactivating when nothing is active is harmless.
+nvm_run_seq() {
+  local d first=() second=() seen=0 a
+  d=$(nvm_dir)
+  [ -s "$d/nvm.sh" ] || return 127
+  for a in "$@"; do
+    if [ "$a" = "--" ]; then seen=1; continue; fi
+    if [ "$seen" -eq 0 ]; then first+=("$a"); else second+=("$a"); fi
+  done
+  ( export NVM_DIR="$d"; . "$d/nvm.sh" >/dev/null 2>&1; nvm "${first[@]}" >/dev/null 2>&1; nvm "${second[@]}" ) </dev/null
+}
+
 # node_fixed_for NODE_BIN : the fixed version for this Node's major line, or empty if none is published.
 node_fixed_for() {
   local v major
@@ -2284,13 +2298,19 @@ offer_node_removal() {
     - this cannot be undone except by reinstalling it: nvm install v$v   (a reinstall brings the problem back).
 
   Command that will run: nvm uninstall v$v"; then
-      fx_cmd "nvm uninstall v$v"
-      if nvm_run uninstall "v$v" >/dev/null 2>&1 && [ ! -d "$(nvm_dir)/versions/node/v$v" ]; then
+      fx_cmd "nvm deactivate && nvm uninstall v$v"
+      # nvm refuses to uninstall the version that is "currently active", and a script started from a shell that
+      # already had v$v active inherits that. `nvm deactivate` only changes PATH inside this subshell, so it cannot
+      # affect the user's own shell. Keep nvm's output so a failure can say why.
+      nvm_out=$(nvm_run_seq deactivate -- uninstall "v$v" 2>&1)
+      if [ ! -d "$(nvm_dir)/versions/node/v$v" ]; then
         fx_ok "removed v$v"
         removed=$((removed + 1))
         FIX_NOTES="${FIX_NOTES}  - Node.js: removed v$v (reinstall with: nvm install v$v)"$'\n'
       else
-        fx_bad "nvm could not remove v$v; it is still installed"
+        fx_bad "nvm could not remove v$v; it is still installed. nvm said:"
+        printf '%s\n' "$nvm_out" | sed 's/^/        /' | head -6
+        fx_say "To finish it yourself, open a NEW shell (one that does not have v$v active) and run: nvm uninstall v$v"
       fi
     else
       fx_say "kept v$v (nothing typed, or not exactly I AGREE)"

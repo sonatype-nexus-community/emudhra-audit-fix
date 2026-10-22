@@ -241,7 +241,11 @@ cleanly if the fixed release is not published yet.
   - A version is **kept, with the reason shown**, if it is your current nvm default or if any nvm alias resolves to it.
     The version just installed, and any newer one, is never offered.
   - Each old version gets its own prompt; agreeing for one does not cover another.
-  - Prefer to do it yourself? Decline and run `nvm uninstall <old>` later.
+  - nvm refuses to uninstall the version that is **currently active** in your shell, and a script started from a shell
+    that still has the old version active inherits that. The script runs `nvm deactivate` and then `nvm uninstall` in
+    its own subshell (your shell is not affected). If nvm still refuses, the script prints nvm's own message and tells
+    you to open a new shell and run `nvm uninstall <old>`.
+  - Prefer to do it yourself? Decline and run `nvm uninstall <old>` later in a shell that does not have it active.
 - `nvm` is a shell function, so the script sources `nvm.sh` in a subshell; your shell and nvm configuration are not changed.
 - Volta, fnm, asdf, mise and Homebrew Node are not handled yet; for those the audit prints the upgrade command.
 
@@ -284,7 +288,7 @@ finds. `--undo` also removes the p11-kit blocklist files that `--fix` created. H
 | OS package version checks (dpkg, apk, rpm) | Tested on Ubuntu, Debian, Alpine 3.18 and 3.20, and Fedora 41. |
 | `--dry-run` on macOS for `sys`, `java`, `brew` and `macpip` | Tested. |
 | The confirmation prompt under a real pseudo-terminal, and refusal with no terminal (`tests/test_confirm_prompt.sh`) | Tested. The test fails on the earlier code that lost the terminal. |
-| Node.js via nvm: install, verify, default alias, declined prompts, failed install, unpublished fix, other major (`tests/test_fix_node.sh`) | Tested against a stub nvm with no network, including the `I AGREE` removal gate (exact match, `--yes`, no terminal, kept default and aliased versions, several old versions, failed uninstall). Mutation-checked: ten deliberate breakages of the script each make the tests fail. **Not run against a real nvm install.** |
+| Node.js via nvm: install, verify, default alias, declined prompts, failed install, unpublished fix, other major (`tests/test_fix_node.sh`) | Tested against a stub nvm with no network, including the `I AGREE` removal gate (exact match, `--yes`, no terminal, kept default and aliased versions, several old versions, failed uninstall, and nvm refusing to remove the active version). The deactivate-then-uninstall sequence was also checked against the real `nvm.sh` in a throwaway `NVM_DIR`. Mutation-checked: ten deliberate breakages of the script each make the tests fail. **Not run against a real nvm install.** |
 | `--yes` validation, bad flags | Tested. |
 | The macOS system-bundle edit, `brew` upgrade and Java `cacerts` fix on a real machine | Applied on a real macOS machine (the backups and a follow-up audit confirm it): the affected items then report as protected. This is not covered by the automated tests. |
 | The macOS `macpip` fix | **Not applied for real.** Dry run only. |
