@@ -92,7 +92,7 @@ protected, and lists the old version under "upgrade when convenient".
 | Go | yes | yes | Fixed in 1.26.10 and 1.27.3. |
 | Python | yes (default store, `certifi` if installed, and `pip download`) | yes | Checks `certifi` >= 2026.10.19 and `pip` >= 26.2.2. Every interpreter found is checked. |
 | Java (JDK/JRE) | yes, needs a `javac` somewhere on the machine | yes | Every install found is checked. Fixed in 8u511, 11.0.33, 17.0.21, 21.0.13, 25.0.5, 27.0.1. |
-| Node.js | yes (and again with `--use-system-ca` when affected) | yes | Fixed in 22.23.4, 24.22.1, 26.12.1. |
+| Node.js | yes (and again with `--use-system-ca` when affected) | yes | Fixed in 22.23.4, 24.22.1, 26.12.1. `--fix --only=node` can upgrade nvm installs; see [Node.js via nvm](#nodejs-via-nvm---onlynode). |
 | Deno | yes | yes | Fixed in 2.9.8. |
 | Bun | yes | no | The page lists the fix as pending. |
 | rustup | no | yes | Fixed in 1.29.2. |
@@ -158,7 +158,7 @@ At the end there is a summary count, followed by the remediation guidance.
 | `-vv` | Everything in `-v`, plus each probe command and the raw TLS errors. |
 | `--fix` | After the audit, offer to apply fixes, asking before each change. See [Applying fixes](#applying-fixes---fix). |
 | `--dry-run` | With `--fix`: run every check and show every step, but change nothing. |
-| `--yes` | With `--fix` or `--undo`: do not ask before each change (for unattended use). |
+| `--yes` | With `--fix` or `--undo`: do not ask the ordinary y/N questions (for unattended use). It **never** answers the `I AGREE` prompt that guards deleting a Node.js version. |
 | `--only=KIND` | With `--fix`: apply one kind of fix only: `brew`, `sys`, `java`, `macpip` or `node`. |
 | `--workaround-only` | With `--fix`: skip mention of the vendor package upgrade on Linux. |
 | `--undo` | Restore the backups made by `--fix`. |
@@ -236,7 +236,8 @@ cleanly if the fixed release is not published yet.
   `y/N` question: the script prints what will be lost (projects pinning that version through `.nvmrc`,
   `.node-version`, `engines` or CI scripts; global npm packages installed only under it; that new shells will no longer
   find it; that undoing it means reinstalling the vulnerable version) and you must type exactly `I AGREE`.
-  - `y`, `yes`, `i agree`, a trailing or leading space, and empty input all cancel. **`--yes` never answers this
+  - The answer is compared byte for byte: `y`, `yes`, `i agree`, `I agree`, a leading or trailing space, and empty
+    input all cancel. **`--yes` never answers this
     prompt**, and with no terminal nothing is removed.
   - A version is **kept, with the reason shown**, if it is your current nvm default or if any nvm alias resolves to it.
     The version just installed, and any newer one, is never offered.
@@ -257,7 +258,8 @@ Each change follows the same sequence (Debian, Ubuntu, Alpine and Fedora differ 
 1. The new file or store is built on a **copy** first.
 2. The copy is **tested**: it must reject the compromised chain, and it must still validate GitHub, Google, PyPI, Maven
    Central, npm and the Go module proxy. If a normal site would break, the change is refused.
-3. You are **asked** (`--yes` skips this; with no terminal and no `--yes` nothing is changed).
+3. You are **asked** (`--yes` skips the y/N question; with no terminal and no `--yes` nothing is changed). Deleting a
+   Node.js version is the exception: it needs `I AGREE` typed on a terminal, and `--yes` cannot supply it.
 4. The original is **backed up** next to itself as `<file>.pre-emudhra-<timestamp>`.
 5. The change is installed, then the tool is **probed again**. If it does not reject the chain, the backup is restored
    automatically.
@@ -288,7 +290,8 @@ finds. `--undo` also removes the p11-kit blocklist files that `--fix` created. H
 | OS package version checks (dpkg, apk, rpm) | Tested on Ubuntu, Debian, Alpine 3.18 and 3.20, and Fedora 41. |
 | `--dry-run` on macOS for `sys`, `java`, `brew` and `macpip` | Tested. |
 | The confirmation prompt under a real pseudo-terminal, and refusal with no terminal (`tests/test_confirm_prompt.sh`) | Tested. The test fails on the earlier code that lost the terminal. |
-| Node.js via nvm: install, verify, default alias, declined prompts, failed install, unpublished fix, other major (`tests/test_fix_node.sh`) | Tested against a stub nvm with no network, including the `I AGREE` removal gate (exact match, `--yes`, no terminal, kept default and aliased versions, several old versions, failed uninstall, and nvm refusing to remove the active version). The deactivate-then-uninstall sequence was also checked against the real `nvm.sh` in a throwaway `NVM_DIR`. Mutation-checked: ten deliberate breakages of the script each make the tests fail. **Not run against a real nvm install.** |
+| Node.js via nvm: install, verify, default alias, declined prompts, failed install, unpublished fix, other major (`tests/test_fix_node.sh`) | Tested against a stub nvm with no network, including the `I AGREE` removal gate (exact match, `--yes`, no terminal, kept default and aliased versions, several old versions, failed uninstall, and nvm refusing to remove the active version). The deactivate-then-uninstall sequence was also checked against the real `nvm.sh` in a throwaway `NVM_DIR`. Mutation-checked: twelve deliberate breakages of the script (skipped verification, an unasked default change, a disabled no-fix guard, six ways of weakening the removal gate or its exclusions, per-binary planning, no deactivate, hidden nvm output) each make the tests fail. |
+| Node.js via nvm on a real machine | One real `--fix --only=node` run on macOS with a real nvm: it upgraded 24.16.0 to 24.22.1, verified it, offered the old version for removal behind `I AGREE`, and removed it (after fixing a bug where nvm refused to remove the version active in the calling shell). One machine, one run: it is not covered by the automated tests. |
 | `--yes` validation, bad flags | Tested. |
 | The macOS system-bundle edit, `brew` upgrade and Java `cacerts` fix on a real machine | Applied on a real macOS machine (the backups and a follow-up audit confirm it): the affected items then report as protected. This is not covered by the automated tests. |
 | The macOS `macpip` fix | **Not applied for real.** Dry run only. |
@@ -301,8 +304,8 @@ to read what it prints.
 
 ### Known limitations of `--fix`
 
-- On Debian, Ubuntu, Alpine and Fedora the change is verified **after** it is installed (and rolled back if it fails), not on a
-  copy beforehand. The macOS bundle and Java stores are tested on a copy first.
+- On Debian, Ubuntu, Alpine and Fedora the change is verified **after** it is installed (and rolled back if it fails),
+  not on a copy beforehand. The macOS bundle and Java stores are tested on a copy first.
 - `--undo` does not reverse a Homebrew upgrade.
 - `--fix` needs the live probes to verify its work, so it cannot be combined with `--no-network`.
 - The Alpine and Debian fixes disable the roots in `ca-certificates.conf`; a later `ca-certificates` package upgrade is the
@@ -362,14 +365,20 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for details.
 ```bash
 tests/test_strip_roots.sh [BUNDLE]        # root-stripping logic against a real CA bundle (read-only)
 tests/test_confirm_prompt.sh              # --fix prompt under a real pseudo-terminal, using a throwaway JDK copy
-tests/test_fix_node.sh                    # --fix --only=node against a stub nvm (no network, ~8 seconds, never touches ~/.nvm)
+tests/test_fix_node.sh                    # --fix --only=node against a stub nvm (no network, ~8s, never touches ~/.nvm)
 tests/test_linux_containers.sh [IMAGE...] # --fix and --undo cycles in throwaway Linux containers (needs Docker)
 ```
 
 `test_confirm_prompt.sh` needs `python3` and a JDK with `keytool`. `test_linux_containers.sh` mounts the repository
-read-only and removes each container afterwards. For testing, `EMUDHRA_JAVA_HOMES` (space-separated paths) replaces JDK
-discovery, so a fix can be pointed at a copy instead of a real JDK; `EMUDHRA_NODE_BINS` does the same for Node.js, and `EMUDHRA_AUDIT_ONLY=node` (or `curl`, `git`, `python`, ...) runs just
-one audit so a test of one fix does not wait on live probes of every other tool.
+read-only and removes each container afterwards.
+
+Three environment variables exist **for tests only** and are not meant for normal use:
+
+- `EMUDHRA_JAVA_HOMES` (space-separated paths) replaces JDK discovery, so a fix can be pointed at a copy instead of a
+  real JDK.
+- `EMUDHRA_NODE_BINS` does the same for Node.js.
+- `EMUDHRA_AUDIT_ONLY=node` (or `curl`, `git`, `python`, ...) runs just that one audit, so a test of one fix does not
+  wait on live probes of every other tool.
 
 ### Releasing
 
