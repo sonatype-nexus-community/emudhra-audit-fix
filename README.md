@@ -63,6 +63,7 @@ that page as of 2026-10-22; check the page for updates.
 ./emudhra-audit-fix.sh --fix --dry-run  # show exactly what a fix would do; change nothing
 ./emudhra-audit-fix.sh --undo --dry-run # show which backups --undo would restore
 ./emudhra-audit-fix.sh --fix --dry-run --only=node  # preview upgrading an nvm-managed Node.js
+./emudhra-audit-fix.sh --fix --dry-run --only=uv    # preview upgrading a standalone uv
 ```
 
 No installation is needed. The script is a single file; make it executable with `chmod +x emudhra-audit-fix.sh` if required.
@@ -96,7 +97,7 @@ protected, and lists the old version under "upgrade when convenient".
 | Deno | yes | yes | Fixed in 2.9.8. |
 | Bun | yes | no | The page lists the fix as pending. |
 | rustup | no | yes | Fixed in 1.29.2. |
-| uv | no | yes | Fixed in 0.13.4. |
+| uv | no | yes | Fixed in 0.13.4. `--fix --only=uv` upgrades a standalone install; see [uv](#uv-standalone-install---onlyuv). |
 | pixi | no | yes | Fixed in 0.82.1. |
 | mise | no | yes | Fixed in 2026.10.17. |
 | Claude Code | no | yes | Fixed in 2.1.303. |
@@ -159,7 +160,7 @@ At the end there is a summary count, followed by the remediation guidance.
 | `--fix` | After the audit, offer to apply fixes, asking before each change. See [Applying fixes](#applying-fixes---fix). |
 | `--dry-run` | With `--fix`: run every check and show every step, but change nothing. |
 | `--yes` | With `--fix` or `--undo`: do not ask the ordinary y/N questions (for unattended use). It **never** answers the `I AGREE` prompt that guards deleting a Node.js version. |
-| `--only=KIND` | With `--fix`: apply one kind of fix only: `brew`, `sys`, `java`, `macpip` or `node`. |
+| `--only=KIND` | With `--fix`: apply one kind of fix only: `brew`, `sys`, `java`, `macpip`, `node` or `uv`. |
 | `--workaround-only` | With `--fix`: skip mention of the vendor package upgrade on Linux. |
 | `--undo` | Restore the backups made by `--fix`. |
 | `-h`, `--help` | Show usage. |
@@ -214,6 +215,7 @@ release exists; the fixes here distrust two roots, which has side effects.
 | `java` | Deletes the two roots from a JDK's `cacerts`. A **stop-gap** for JDKs with no fixed build; a JDK upgrade restores them. | if the JDK is not yours |
 | `macpip` | Appends the page's `PIP_CERT` line to Apple's Python `sitecustomize.py`. | yes |
 | `node` | Upgrades a Node.js installed with **nvm** to the fixed release for its own major line (see below). An upgrade, not a trust-store edit. | no |
+| `uv` | Runs `uv self update` for a **standalone** uv install (see below). An upgrade, not a trust-store edit. | no |
 
 The two roots are `AAA Certificate Services` (Comodo/Sectigo) and `emSign ECC Root CA - G3`. Nothing else is removed. The
 script refuses to proceed if a change would remove more than expected.
@@ -249,6 +251,19 @@ cleanly if the fixed release is not published yet.
   - Prefer to do it yourself? Decline and run `nvm uninstall <old>` later in a shell that does not have it active.
 - `nvm` is a shell function, so the script sources `nvm.sh` in a subshell; your shell and nvm configuration are not changed.
 - Volta, fnm, asdf, mise and Homebrew Node are not handled yet; for those the audit prints the upgrade command.
+
+### uv, standalone install (`--only=uv`)
+
+For a uv behind 0.13.4, `--fix` first works out **how uv was installed**: the standalone installer's receipt
+(`~/.config/uv/uv-receipt.json`, or under `$XDG_CONFIG_HOME`) and the binary's path decide it.
+
+- **Standalone:** after a `y/N` prompt (`--yes` skips it), it runs `uv self update`. `--dry-run` only prints the command.
+- **Homebrew, pipx, pip, cargo, mise, asdf or unknown:** `self update` is **never** run. The audit and `--fix` print the
+  right command instead (`brew upgrade uv`, `pipx upgrade uv`, ...) and the item counts as skipped. mise and asdf are not
+  fought.
+- Afterwards it re-reads `uv --version` and compares it with 0.13.4. This is a **version check, not a TLS probe**. If uv
+  no longer reports a version, the previous binary is restored.
+- Upgrading uv does not upgrade the Python versions or tools it manages (`uv python`, `uv tool`).
 
 ### Safeguards
 
@@ -366,6 +381,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for details.
 tests/test_strip_roots.sh [BUNDLE]        # root-stripping logic against a real CA bundle (read-only)
 tests/test_confirm_prompt.sh              # --fix prompt under a real pseudo-terminal, using a throwaway JDK copy
 tests/test_fix_node.sh                    # --fix --only=node against a stub nvm (no network, ~8s, never touches ~/.nvm)
+tests/test_fix_uv.sh                      # --fix --only=uv against a stub uv binary (no network, throwaway HOME)
 tests/test_linux_containers.sh [IMAGE...] # --fix and --undo cycles in throwaway Linux containers (needs Docker)
 ```
 

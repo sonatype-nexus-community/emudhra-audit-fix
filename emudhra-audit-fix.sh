@@ -71,7 +71,7 @@ Fix options (these can modify the system; sudo is used where needed):
   --yes             with --fix: do not ask before each change
   --workaround-only with --fix: skip the vendor package upgrade on Linux and go straight
                     to blocking the two roots
-  --only=KIND       with --fix: apply only one kind of fix: brew, sys, java, macpip or node
+  --only=KIND       with --fix: apply only one kind of fix: brew, sys, java, macpip, node or uv
   --undo            restore the backups made by --fix (asks first; honours --dry-run/--yes)
 
   -h, --help        show this help
@@ -98,7 +98,7 @@ done
 if [ "$UNDO" -eq 1 ] && [ "$FIXMODE" -eq 1 ] && [ "$DRY" -eq 0 ]; then
   echo "--undo cannot be combined with --fix" >&2; exit 2
 fi
-case $ONLY in ""|brew|sys|java|macpip|node) ;; *) echo "--only must be one of: brew, sys, java, macpip, node" >&2; exit 2 ;; esac
+case $ONLY in ""|brew|sys|java|macpip|node|uv) ;; *) echo "--only must be one of: brew, sys, java, macpip, node, uv" >&2; exit 2 ;; esac
 if [ "$YES" -eq 1 ] && [ "$FIXMODE" -eq 0 ] && [ "$UNDO" -eq 0 ]; then
   echo "--yes only makes sense with --fix or --undo" >&2; exit 2
 fi
@@ -133,6 +133,7 @@ BREW_PREFIX=
 PYBIN=
 PROBE_RES=
 NODE_SYSCA_RES=
+UV_FIXED=0.13.4         # first uv release with the fix
 JAVA_PROBE_OK=0         # 1 once a Java probe class has been compiled
 PLAN=$'\n'              # fixes this script can apply: kind|target lines (see plan_add)
 
@@ -1261,6 +1262,10 @@ audit_simple() {
     found=1
     v=$(version_of "$name" "$b")
     vcmp "$v" "$fixed"
+    if [ "$VC" = behind ] && [ "$name" = uv ]; then
+      upg=$(uv_upgrade_cmd "$(uv_install_method "$b")")
+      plan_add uv "$b"
+    fi
     if [ "$VC" = behind ]; then
       fixc "$upg"
       fix "Upgrade $label to $fixed or later: $upg"
@@ -1272,6 +1277,39 @@ $({ command -v "$name" 2>/dev/null; for b in $extra; do [ -x "$b" ] && echo "$b"
 EOF
   [ "$found" -eq 0 ] && audit_none
   return 0
+}
+
+# uv_install_method BIN : standalone | brew | pipx | pip | cargo | mise | asdf | unknown. `uv self update` only works
+# for the standalone installer, which leaves a receipt (uv-receipt.json) naming the directory it installed into.
+uv_install_method() {
+  local b=$1 r d receipt
+  r=$(resolve "$b"); d=$(dirname "$b")
+  case $b$r in
+    */mise/*) echo mise; return ;;
+    */.asdf/*) echo asdf; return ;;
+    */pipx/venvs/*|*/pipx/shims/*) echo pipx; return ;;
+    */Cellar/*|/opt/homebrew/*|/usr/local/opt/*|*/.linuxbrew/*) echo brew; return ;;
+  esac
+  # pip puts uv in <env>/bin with the package beside it in <env>/lib/python*/site-packages
+  if ls -d "$(dirname "$d")"/lib/python*/site-packages/uv >/dev/null 2>&1; then echo pip; return; fi
+  receipt="${XDG_CONFIG_HOME:-$HOME/.config}/uv/uv-receipt.json"
+  if [ -r "$receipt" ] && grep -q -F "\"$d\"" "$receipt" 2>/dev/null; then echo standalone; return; fi
+  case $b in "$HOME"/.cargo/bin/*) echo cargo; return ;; esac
+  echo unknown
+}
+
+# uv_upgrade_cmd METHOD : the right upgrade command for how uv was installed.
+uv_upgrade_cmd() {
+  case $1 in
+    standalone) echo "uv self update" ;;
+    brew)  echo "brew upgrade uv" ;;
+    pipx)  echo "pipx upgrade uv" ;;
+    pip)   echo "pip install --upgrade uv   (in the environment that owns it)" ;;
+    cargo) echo "cargo install --locked --force uv" ;;
+    mise)  echo "mise use -g uv@latest   (mise manages this uv)" ;;
+    asdf)  echo "asdf install uv latest && asdf global uv latest" ;;
+    *)     echo "uv self update   (standalone install), or your package manager: brew upgrade uv / pipx upgrade uv" ;;
+  esac
 }
 
 # version_of NAME BIN : print a bare dotted version for the tool.
@@ -2330,6 +2368,44 @@ node_probe_bin() {
   printf '%s\n' "$out" | judge
 }
 
+# ---- uv (standalone installer only)
+# fix_uv UV_BIN : `uv self update` for a standalone install; for any other install method print the right command
+# and change nothing. The binary is copied first and put back if the update leaves uv broken or still behind.
+fix_uv() {
+  local b=$1 how cmd oldv newv bak
+  how=$(uv_install_method "$b"); cmd=$(uv_upgrade_cmd "$how")
+  oldv=$(version_of uv "$b")
+  fx_say "${C_BLD}uv${C_OFF}  $b  ($oldv, install method: $how)"
+  if [ "$how" != standalone ]; then
+    fx_warn "this uv was not installed by the standalone installer, so 'uv self update' is not used. Run: $cmd"
+    SKIPPED_N=$((SKIPPED_N + 1)); return
+  fi
+  if [ "$DRY" -eq 1 ]; then
+    fx_cmd "$b self update"
+    fx_say "[dry-run] would then re-read 'uv --version' and compare it with $UV_FIXED; nothing is changed now"
+    return
+  fi
+  confirm "Upgrade uv with '$b self update'?" || { fx_say "skipped"; SKIPPED_N=$((SKIPPED_N + 1)); return; }
+  bak="$TMP/uv.bak"
+  cp -p "$b" "$bak" || { fx_bad "could not back up $b - nothing was changed"; FAILED_N=$((FAILED_N + 1)); return; }
+  fx_cmd "$b self update"
+  "$b" self update </dev/null 2>&1 | sed 's/^/      /' | tail -6
+  newv=$(version_of uv "$b")
+  if [ -z "$newv" ]; then
+    fx_bad "uv no longer reports a version - restoring the previous binary"
+    cp -p "$bak" "$b"; FAILED_N=$((FAILED_N + 1)); return
+  fi
+  if ver_ge "$newv" "$UV_FIXED"; then
+    fx_ok "uv --version now reports $newv (fixed in $UV_FIXED). This is a version check, not a TLS probe."
+    FIXED_N=$((FIXED_N + 1))
+    FIX_NOTES="${FIX_NOTES}  - uv: $oldv -> $newv"$'\n'
+  else
+    fx_bad "uv reports $newv, still behind $UV_FIXED (the update may not have happened) - the binary still works"
+    FAILED_N=$((FAILED_N + 1))
+  fi
+  fx_say "Note: this upgrades uv only. Python versions and tools that uv manages (uv python / uv tool) are not upgraded."
+}
+
 # ---- orchestration
 run_fixes() {
   local line kind target ran=0
@@ -2350,7 +2426,7 @@ run_fixes() {
   # for everything run inside the loop (brew, keytool, prompts), which is how confirm() once lost its terminal.
   local oldifs=$IFS
   IFS=$'\n'
-  for kind in brew sys java macpip node; do
+  for kind in brew sys java macpip node uv; do
     for line in $PLAN; do
       IFS=$oldifs
       case $line in "$kind|"*) ;; *) IFS=$'\n'; continue ;; esac
@@ -2363,6 +2439,7 @@ run_fixes() {
         java)   fix_java_store "$target" ;;
         macpip) fix_macos_pip ;;
         node)   fix_node_nvm "$target" ;;
+        uv)     fix_uv "$target" ;;
       esac
       IFS=$'\n'
     done
