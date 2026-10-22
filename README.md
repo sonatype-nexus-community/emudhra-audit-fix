@@ -158,7 +158,7 @@ At the end there is a summary count, followed by the remediation guidance.
 | `--fix` | After the audit, offer to apply fixes, asking before each change. See [Applying fixes](#applying-fixes---fix). |
 | `--dry-run` | With `--fix`: run every check and show every step, but change nothing. |
 | `--yes` | With `--fix` or `--undo`: do not ask before each change (for unattended use). |
-| `--only=KIND` | With `--fix`: apply one kind of fix only: `brew`, `sys`, `java` or `macpip`. |
+| `--only=KIND` | With `--fix`: apply one kind of fix only: `brew`, `sys`, `java`, `macpip` or `node`. |
 | `--workaround-only` | With `--fix`: skip mention of the vendor package upgrade on Linux. |
 | `--undo` | Restore the backups made by `--fix`. |
 | `-h`, `--help` | Show usage. |
@@ -211,9 +211,25 @@ release exists; the fixes here distrust two roots, which has side effects.
 | `sys` | Removes the two roots from the system CA bundle: `/etc/ssl/cert.pem` on macOS; `ca-certificates.conf` plus `update-ca-certificates` on Debian, Ubuntu and Alpine; the p11-kit blocklist on Fedora, RHEL, SUSE and Arch (only Fedora tested). | yes |
 | `java` | Deletes the two roots from a JDK's `cacerts`. A **stop-gap** for JDKs with no fixed build; a JDK upgrade restores them. | if the JDK is not yours |
 | `macpip` | Appends the page's `PIP_CERT` line to Apple's Python `sitecustomize.py`. | yes |
+| `node` | Upgrades a Node.js installed with **nvm** to the fixed release for its own major line (see below). An upgrade, not a trust-store edit. | no |
 
 The two roots are `AAA Certificate Services` (Comodo/Sectigo) and `emSign ECC Root CA - G3`. Nothing else is removed. The
 script refuses to proceed if a change would remove more than expected.
+
+### Node.js via nvm (`--only=node`)
+
+For a Node.js under `$NVM_DIR` (default `~/.nvm`) that is behind its fixed release, `--fix` runs
+`nvm install v<fixed> --reinstall-packages-from=<old>`, where `<fixed>` is the fixed release for the **same major line**
+(22.23.4, 24.22.1 or 26.12.1). It will not jump to another major, and it asks `nvm version-remote` first, so it refuses
+cleanly if the fixed release is not published yet.
+
+- The new binary is probed afterwards and must reject the compromised chain; otherwise nothing else is changed.
+- Making the new version your **default** is a separate prompt, offered only if the old version is currently your nvm
+  default. Other projects may rely on it, so it is never switched silently. If the new binary fails verification, the
+  default is not touched at all, even with `--yes`.
+- The old version is **never uninstalled**. The output prints `nvm uninstall <old>` for when you are ready.
+- `nvm` is a shell function, so the script sources `nvm.sh` in a subshell; your shell and nvm configuration are not changed.
+- Volta, fnm, asdf, mise and Homebrew Node are not handled yet; for those the audit prints the upgrade command.
 
 ### Safeguards
 
@@ -254,6 +270,7 @@ finds. `--undo` also removes the p11-kit blocklist files that `--fix` created. H
 | OS package version checks (dpkg, apk, rpm) | Tested on Ubuntu, Debian, Alpine 3.18 and 3.20, and Fedora 41. |
 | `--dry-run` on macOS for `sys`, `java`, `brew` and `macpip` | Tested. |
 | The confirmation prompt under a real pseudo-terminal, and refusal with no terminal (`tests/test_confirm_prompt.sh`) | Tested. The test fails on the earlier code that lost the terminal. |
+| Node.js via nvm: install, verify, default alias, declined prompts, failed install, unpublished fix, other major (`tests/test_fix_node.sh`) | Tested against a stub nvm with no network. The tests were mutation-checked: disabling verification, the default prompt or the no-fix guard each makes them fail. **Not run against a real nvm install.** |
 | `--yes` validation, bad flags | Tested. |
 | The macOS system-bundle edit, `brew` upgrade and Java `cacerts` fix on a real machine | Applied on a real macOS machine (the backups and a follow-up audit confirm it): the affected items then report as protected. This is not covered by the automated tests. |
 | The macOS `macpip` fix | **Not applied for real.** Dry run only. |
@@ -327,12 +344,13 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for details.
 ```bash
 tests/test_strip_roots.sh [BUNDLE]        # root-stripping logic against a real CA bundle (read-only)
 tests/test_confirm_prompt.sh              # --fix prompt under a real pseudo-terminal, using a throwaway JDK copy
+tests/test_fix_node.sh                    # --fix --only=node against a stub nvm (no network, never touches ~/.nvm)
 tests/test_linux_containers.sh [IMAGE...] # --fix and --undo cycles in throwaway Linux containers (needs Docker)
 ```
 
 `test_confirm_prompt.sh` needs `python3` and a JDK with `keytool`. `test_linux_containers.sh` mounts the repository
 read-only and removes each container afterwards. For testing, `EMUDHRA_JAVA_HOMES` (space-separated paths) replaces JDK
-discovery, so a fix can be pointed at a copy instead of a real JDK.
+discovery, so a fix can be pointed at a copy instead of a real JDK; `EMUDHRA_NODE_BINS` does the same for Node.js.
 
 ### Releasing
 
