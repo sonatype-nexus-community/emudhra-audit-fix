@@ -3,7 +3,7 @@
 # emudhra-audit-fix.sh - read-only audit of developer tools against the eMudhra
 # intermediate CA compromise: https://emudhra.we-have-a-problem.com/
 #
-# Covers curl, git, Go, Python (incl. pip), Java, Node.js, Deno, Bun, rustup, uv, pixi, mise,
+# Covers curl, git, Go, Python (incl. pip and uv Python/tool environments), Java, Node.js, Deno, Bun, rustup, uv, pixi, mise,
 # Claude Code, Electron apps, Homebrew ca-certificates, system CA bundle files
 # and OS CA packages. For each tool found it runs two checks:
 #   1. Live probe   - the tool itself connects to hosts that chain to the
@@ -21,11 +21,11 @@
 # and guidance is only printed. Small probe programs are written to a private
 # temp directory, which is deleted on exit.
 #
-# With --fix it can also apply the fixes it knows about (system CA bundle,
-# Java cacerts, Homebrew ca-certificates, macOS built-in pip). Each change is
-# confirmed, verified on a copy first, backed up with a timestamp, re-verified
-# after install and rolled back if it fails. --dry-run shows the plan without
-# changing anything; --undo restores the backups.
+# With --fix it can also edit supported trust stores and apply supported package
+# manager upgrades. Changes are confirmed, backed up, verified and restored on
+# failure. Trust-store edits are tested on copies where supported. --dry-run
+# shows the plan without changing installations; --undo restores system and JDK
+# backups, but does not reverse successful package manager upgrades.
 #
 # Portable: bash 3.2+ (stock macOS) and Linux. No jq/python needed by the
 # script itself.
@@ -71,8 +71,8 @@ Fix options (these can modify the system; sudo is used where needed):
   --yes             with --fix: do not ask before each change
   --workaround-only with --fix: skip the vendor package upgrade on Linux and go straight
                     to blocking the two roots
-  --only=KIND       with --fix: apply only one kind of fix: brew, sys, java, macpip, node, uv or rustup
-  --undo            restore the backups made by --fix (asks first; honours --dry-run/--yes)
+  --only=KIND       with --fix: apply only one kind of fix: brew, sys, java, macpip, node, uv, uvpython, uvtools or rustup
+  --undo            restore system/JDK backups (uv upgrades excluded; asks first)
 
   -h, --help        show this help
 EOF
@@ -98,7 +98,7 @@ done
 if [ "$UNDO" -eq 1 ] && [ "$FIXMODE" -eq 1 ] && [ "$DRY" -eq 0 ]; then
   echo "--undo cannot be combined with --fix" >&2; exit 2
 fi
-case $ONLY in ""|brew|sys|java|macpip|node|uv|rustup) ;; *) echo "--only must be one of: brew, sys, java, macpip, node, uv, rustup" >&2; exit 2 ;; esac
+case $ONLY in ""|brew|sys|java|macpip|node|uv|uvpython|uvtools|rustup) ;; *) echo "--only must be one of: brew, sys, java, macpip, node, uv, uvpython, uvtools, rustup" >&2; exit 2 ;; esac
 if [ "$YES" -eq 1 ] && [ "$FIXMODE" -eq 0 ] && [ "$UNDO" -eq 0 ]; then
   echo "--yes only makes sense with --fix or --undo" >&2; exit 2
 fi
@@ -131,6 +131,8 @@ FIXSYS=0; FIXPIP=0       # set by fix_* when an item's guidance points at a shar
 NEED_SYS=0; NEED_PIPMAC=0  # shared guidance blocks to print (only if an affected item needs them)
 BREW_PREFIX=
 PYBIN=
+UV_BIN=; UV_PYTHON_DIR=; UV_TOOLS_DIR=
+UV_PYTHON_COUNT=0; UV_TOOL_COUNT=0
 PROBE_RES=
 NODE_SYSCA_RES=
 UV_FIXED=0.13.4         # first uv release with the fix
@@ -218,6 +220,8 @@ resolve() {
 
 # plan_add KIND TARGET : record a fix that --fix can apply (deduplicated).
 plan_add() {
+  # Plan rows are newline delimited. Filesystem names must not create new rows.
+  case "$1$2" in *$'\n'*) return 1 ;; esac
   case $PLAN in *$'\n'"$1|$2"$'\n'*) return 0 ;; esac
   PLAN="$PLAN$1|$2"$'\n'
 }
@@ -408,7 +412,7 @@ audit_none() {
 # ----------------------------------------------------------- probe programs
 
 cat > "$TMP/py_probe.py" <<'EOF'
-import sys, ssl
+import os, sys, ssl
 
 def meta(name):
     try:
@@ -420,6 +424,8 @@ def meta(name):
 mode = sys.argv[1]
 if mode == "info":
     print("pyver=%d.%d.%d" % sys.version_info[:3])
+    print("baseprefix=" + os.path.realpath(sys.base_prefix))
+    print("implementation=" + sys.implementation.name)
     print("certifi=" + meta("certifi"))
     print("pip=" + meta("pip"))
     print("cafile=" + str(ssl.get_default_verify_paths().cafile))
@@ -624,11 +630,135 @@ audit_go() {
 
 # ----------------------------------------------------------------- Python
 
+# Ask uv for its locations rather than guessing XDG paths. A private cache keeps
+# directory discovery from locking or writing the user's cache, even during audits.
+uv_read() {
+  run_to 15 "$UV_BIN" --offline --no-config --no-python-downloads --cache-dir "$TMP/uv-cache" "$@"
+}
+
+# Some uv releases return directory overrides verbatim, including relative paths.
+# Resolve them against uv's working directory before using them for discovery or backups.
+uv_absolute_dir() {
+  local dir=$1 root=${UV_WORKING_DIR:-$PWD}
+  case $root in /*) ;; *) root="$PWD/$root" ;; esac
+  case $dir in ""|*$'\n'*) return 1 ;; esac
+  case $dir in /*) ;; *) dir="$root/$dir" ;; esac
+  if [ -d "$dir" ]; then (cd -P "$dir" && pwd); else printf '%s\n' "$dir"; fi
+}
+
+uv_environment_dirs() {
+  local kind dir
+  UV_BIN=$(command -v uv 2>/dev/null)
+  if [ -z "$UV_BIN" ]; then
+    for dir in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
+      [ -x "$dir" ] && { UV_BIN=$dir; break; }
+    done
+  fi
+  [ -n "$UV_BIN" ] || return 0
+  for kind in python tool; do
+    if ! dir=$(uv_read "$kind" dir 2>/dev/null) || [ -z "$dir" ] || [[ "$dir" = *$'\n'* ]]; then
+      report "uv $kind discovery" "$UV_BIN" "?" unknown "" "inconclusive:uv could not report its $kind directory; update uv or check its configuration"
+      continue
+    fi
+    dir=$(uv_absolute_dir "$dir")
+    case $kind in
+      python) UV_PYTHON_DIR=$dir ;;
+      tool)   UV_TOOLS_DIR=$dir ;;
+    esac
+  done
+}
+
+# A uv environment is only confirmed protected when every applicable probe is
+# conclusive. One rejected store cannot certify another store we could not test.
+combine_uv_python_probe() {
+  local result v
+  result=$(combine_probe "$@")
+  if [ "$result" != trusted ]; then
+    for v in "$@"; do
+      case $v in inconclusive*) printf '%s\n' "$v"; return ;; esac
+    done
+  fi
+  printf '%s\n' "$result"
+}
+
+# Only ordinary managed CPython installs are eligible for automatic patch upgrades.
+# Alternative implementations, free-threaded and debug variants need explicit handling.
+uv_managed_minor() {
+  [ "$3" = cpython ] && [ -n "$UV_PYTHON_DIR" ] || return 1
+  case $1 in "$UV_PYTHON_DIR"/cpython-*) ;; *) return 1 ;; esac
+  case ${1##*/} in "cpython-$2-"*) ;; *) return 1 ;; esac
+  case ${1##*/} in *+*) return 1 ;; esac
+  local minor=${2%.*}
+  case $minor in 3.[0-9]|3.[0-9][0-9]) printf '%s\n' "$minor" ;; *) return 1 ;; esac
+}
+
+# Query uv's bundled catalogue offline, keeping patch availability separate from
+# the advisory's fixed certifi/pip versions and from the live TLS verdict.
+uv_python_latest() {
+  local base=${1##*/} pv=$2 minor=${2%.*} suffix file key rest v latest=
+  suffix=${base#cpython-"$pv"}
+  file="$TMP/uv-python-latest-$minor$suffix"
+  if [ ! -f "$file" ]; then
+    if uv_read python list --only-downloads --managed-python "cpython@$minor" > "$file.list" 2>/dev/null; then
+      while read -r key rest; do
+        case $key in cpython-*"$suffix") ;; *) continue ;; esac
+        v=${key#cpython-}; v=${v%"$suffix"}
+        case $v in ""|*[!0-9.]*) continue ;; esac
+        [ "${v%.*}" = "$minor" ] || continue
+        if [ -z "$latest" ] || ver_ge "$v" "$latest"; then latest=$v; fi
+      done < "$file.list"
+      printf '%s\n' "$latest" > "$file"
+    else
+      printf 'unknown\n' > "$file"
+    fi
+  fi
+  cat "$file"
+}
+
+uv_python_newest_installed() {
+  local base=${1##*/} pv=$2 minor=${2%.*} suffix d v newest=$2
+  suffix=${base#cpython-"$pv"}
+  for d in "$UV_PYTHON_DIR"/cpython-"$minor".*"$suffix"; do
+    [ -x "$d/bin/python3" ] || continue
+    v=${d##*/}; v=${v#cpython-}; v=${v%"$suffix"}
+    case $v in ""|*[!0-9.]*) continue ;; esac
+    [ "${v%.*}" = "$minor" ] || continue
+    ver_ge "$v" "$newest" && newest=$v
+  done
+  printf '%s\n' "$newest"
+}
+
+# A downloaded patch retained after rollback need not be the preferred runtime.
+# Check both uv's minor alias and its installed executable links before suppressing
+# an older installation. Unknown executable-directory discovery is conservative.
+uv_python_is_selected() {
+  local base=$1 pv=$2 minor=${2%.*} suffix preferred bindir f dest
+  suffix=${base##*/}; suffix=${suffix#cpython-"$pv"}
+  preferred="$UV_PYTHON_DIR/cpython-$minor$suffix"
+  if [ -d "$preferred" ] && [ "$(cd -P "$preferred" && pwd)" = "$base" ]; then return 0; fi
+  bindir=$(uv_bin_dir python) || return 0
+  for f in "$bindir/python" "$bindir/python3" "$bindir/python$minor"; do
+    [ -L "$f" ] || continue
+    dest=$(resolve "$f")
+    case $dest in "$base"/*) return 0 ;; esac
+  done
+  return 1
+}
+
+plan_uv_python() {
+  local file="$TMP/uv-python-target-$1" previous
+  plan_add uvpython "$1"
+  case $2 in ""|unknown) return ;; esac
+  previous=$(cat "$file" 2>/dev/null)
+  if [ -z "$previous" ] || ver_ge "$2" "$previous"; then printf '%s\n' "$2" > "$file"; fi
+}
+
 python_candidates() {
   local IFS=: d p base
   for d in $PATH /opt/homebrew/bin /usr/local/bin "$HOME"/.pyenv/versions/*/bin \
            /Library/Frameworks/Python.framework/Versions/*/bin \
-           "$HOME"/.asdf/installs/python/*/bin "$HOME"/.local/share/mise/installs/python/*/bin; do
+           "$HOME"/.asdf/installs/python/*/bin "$HOME"/.local/share/mise/installs/python/*/bin \
+           ${UV_PYTHON_DIR:+"$UV_PYTHON_DIR"/*/bin}; do
     [ -d "$d" ] || continue
     for p in "$d"/python*; do
       base=${p##*/}
@@ -637,6 +767,13 @@ python_candidates() {
       esac
     done
   done
+  if [ -n "$UV_TOOLS_DIR" ]; then
+    for d in "$UV_TOOLS_DIR"/*; do
+      # A receipt distinguishes installed tools from cache or unrelated directories.
+      # Include broken/missing Python executables so they are reported as unknown.
+      [ -f "$d/uv-receipt.toml" ] && printf '%s\n' "$d/bin/python"
+    done
+  fi
 }
 
 # pip_probe_all PYTHON : pip's own TLS behaviour. Asks each host's /simple/ index for a package
@@ -645,7 +782,7 @@ pip_probe_all() {
   local u rc out
   for u in $CONTROL_URL $BAD_URLS; do
     rm -rf "$TMP/pipdl"
-    run_to 40 "$1" -I -m pip download --no-deps --no-input --disable-pip-version-check \
+    run_to 40 "$1" -I -B -m pip download --no-deps --no-input --disable-pip-version-check \
       --retries 0 --timeout 10 -d "$TMP/pipdl" --index-url "${u}simple/" emudhra-probe-does-not-exist \
       >"$TMP/pipout" 2>&1 </dev/null
     rc=$?
@@ -664,29 +801,71 @@ pip_probe_all() {
   done
 }
 
+uv_tool_name_safe() {
+  case $1 in ""|*[!a-zA-Z0-9._-]*|[-.]* ) return 1 ;; esac
+  return 0
+}
+
 audit_python() {
   audit_start "Python"
   local found=0 p key info pv cf pip cafile ossl res1 res2 res3 res vc vn out extra envn
-  local cands
+  local cands tool name envdir resolved baseprefix implementation minor needs_update latest newest patch_available selected
+  uv_environment_dirs
   cands=$(python_candidates | awk '!s[$0]++')
-  for p in $cands; do
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    tool=Python; name=
+    envdir=$(cd -P "$(dirname "$p")/.." 2>/dev/null && pwd)
+    resolved=$(resolve "$p")
+    if [ -n "$UV_TOOLS_DIR" ] && [ -f "$envdir/uv-receipt.toml" ]; then
+      name=${envdir##*/}; tool="uv tool: $name Python"
+    elif [ -n "$UV_PYTHON_DIR" ]; then
+      case $resolved in "$UV_PYTHON_DIR"/*) tool="uv Python" ;; esac
+    fi
     # macOS /usr/bin/python3 is a stub that prompts to install the Command Line Tools.
     if [ "$p" = /usr/bin/python3 ] && [ "$(uname)" = Darwin ] && ! xcode-select -p >/dev/null 2>&1; then
       continue
     fi
-    key="python:$(resolve "$p")"
+    # Never deduplicate a virtual environment by its underlying Python executable.
+    # Separate tool environments can carry different certifi and pip bundles.
+    if [ -f "$envdir/pyvenv.cfg" ] || [ -n "$name" ]; then
+      key="python-env:$envdir"
+    else
+      key="python:$resolved"
+    fi
     first_time "$key" || continue
     found=1
-    info=$("$p" -I "$TMP/py_probe.py" info 2>/dev/null)
+    [ "$tool" = "uv Python" ] && UV_PYTHON_COUNT=$((UV_PYTHON_COUNT + 1))
+    [ -n "$name" ] && UV_TOOL_COUNT=$((UV_TOOL_COUNT + 1))
+    if [ -n "$name" ] && ! uv_tool_name_safe "$name"; then
+      report "uv tool environment" "$p" "?" unknown "" "inconclusive:unsupported tool name; cannot safely plan an upgrade"
+      continue
+    fi
+    info=$("$p" -I -B "$TMP/py_probe.py" info 2>/dev/null)
     pv=$(printf '%s\n' "$info" | sed -n 's/^pyver=//p')
     if [ -z "$pv" ]; then
-      report "Python" "$p" "?" unknown "" "inconclusive:interpreter could not run the probe (Python 3.8+ needed)"
+      report "$tool" "$p" "?" unknown "" "inconclusive:interpreter could not run the probe (Python 3.8+ needed)"
       continue
     fi
     [ -z "$PYBIN" ] && PYBIN=$p
     cf=$(printf '%s\n' "$info" | sed -n 's/^certifi=//p')
     pip=$(printf '%s\n' "$info" | sed -n 's/^pip=//p')
     cafile=$(printf '%s\n' "$info" | sed -n 's/^cafile=//p')
+    baseprefix=$(printf '%s\n' "$info" | sed -n 's/^baseprefix=//p')
+    if [ -d "$baseprefix" ]; then baseprefix=$(cd -P "$baseprefix" && pwd); fi
+    implementation=$(printf '%s\n' "$info" | sed -n 's/^implementation=//p')
+    minor=$(uv_managed_minor "$baseprefix" "$pv" "$implementation")
+    latest=; newest=$pv; patch_available=0; selected=0
+    if [ -n "$minor" ]; then
+      newest=$(uv_python_newest_installed "$baseprefix" "$pv")
+      if [ "$tool" = "uv Python" ]; then
+        if ! ver_ge "$pv" "$newest" && uv_python_is_selected "$baseprefix" "$pv"; then selected=1; fi
+        latest=$(uv_python_latest "$baseprefix" "$pv")
+        case $latest in ""|unknown) ;;
+          *) if ! ver_ge "$newest" "$latest"; then patch_available=1; fi ;;
+        esac
+      fi
+    fi
     ossl=$(printf '%s\n' "$info" | sed -n 's/^openssl=//p')
 
     # Version check: certifi >= 2026.10.19, pip >= 26.2.2 (CPython itself has no listed fix;
@@ -707,17 +886,17 @@ audit_python() {
       res="skipped:--no-network"; res1=$res; res2=; res3=
     else
       log_cmd "$p -I <tmp>/py_probe.py default <urls>"
-      out=$("$p" -I "$TMP/py_probe.py" default $CONTROL_URL $BAD_URLS 2>"$TMP/err")
+      out=$("$p" -I -B "$TMP/py_probe.py" default $CONTROL_URL $BAD_URLS 2>"$TMP/err")
       show_err
       res1=$(printf '%s\n' "$out" | judge)
       res2=
       if [ -n "$cf" ]; then
         log_cmd "$p -I <tmp>/py_probe.py certifi <urls>"
-        out=$("$p" -I "$TMP/py_probe.py" certifi $CONTROL_URL $BAD_URLS 2>"$TMP/err")
+        out=$("$p" -I -B "$TMP/py_probe.py" certifi $CONTROL_URL $BAD_URLS 2>"$TMP/err")
         show_err
         res2=$(printf '%s\n' "$out" | judge)
       fi
-      if "$p" -I -m pip --version >/dev/null 2>&1 </dev/null; then
+      if "$p" -I -B -m pip --version >/dev/null 2>&1 </dev/null; then
         log_cmd "$p -I -m pip download --no-deps --index-url <host>/simple/ emudhra-probe-does-not-exist"
         out=$(pip_probe_all "$p")
         show_err
@@ -725,7 +904,11 @@ audit_python() {
       else
         res3="skipped:pip is not installed for this interpreter"
       fi
-      res=$(combine_probe "$res1" "$res2" "$res3")
+      if [ "$tool" = "uv Python" ] || [ -n "$name" ]; then
+        res=$(combine_uv_python_probe "$res1" "$res2" "$res3")
+      else
+        res=$(combine_probe "$res1" "$res2" "$res3")
+      fi
     fi
     extra="    detail:  default trust store: $(describe_probe "$res1")"
     [ -n "$res2" ] && extra="$extra
@@ -737,9 +920,59 @@ audit_python() {
     envn=$(env_notes SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE PIP_CERT)
     [ -n "$envn" ] && extra="$extra
 $envn"
-    fix_python "$p" "$cafile" "$res1" "$res2" "$vc" "$res3"
-    report "Python" "$p" "$pv" "$vc" "$vn" "$res" "$extra"
-  done
+    # Like the existing Node planner, keep upgrade offers for known outdated
+    # components even when a patched trust store currently protects the process.
+    needs_update=0
+    if [ "$res" = trusted ] || [ "$vc" = behind ]; then needs_update=1; fi
+    if [ -n "$name" ]; then
+      if [ -n "$minor" ] && ! ver_ge "$pv" "$newest"; then
+        needs_update=1
+        extra="$extra
+             runtime: a newer managed Python $newest is already installed; this tool can be rebuilt on that minor line"
+      fi
+      [ "$needs_update" -eq 1 ] && plan_add uvtools "$name"
+      if [ "$res1" = trusted ] && [ -n "$minor" ] && ver_ge "$pv" "$newest"; then plan_uv_python "$minor" ""; fi
+      extra="$extra
+             scope: Python TLS and installed certifi/pip only; application clients and native binaries are not probed"
+      if [ "$needs_update" -eq 1 ]; then
+        fixc "uv tool upgrade $(printf '%q' "$name"); then re-audit this environment"
+        fix "Upgrade through uv, preserving recorded requirements: uv tool upgrade $(printf '%q' "$name")"
+        fix "Version pins and local/Git sources can prevent a dependency upgrade. Do not mutate a uv tool environment with pip."
+        fix "If its Python is outdated, rebuild with uv using a newer patch of the same Python minor version."
+      fi
+    else
+      fix_python "$p" "$cafile" "$res1" "$res2" "$vc" "$res3"
+      if [ "$tool" = "uv Python" ] && [ -n "$minor" ]; then
+        case $latest in
+          unknown) extra="$extra
+             update: uv catalogue could not be read; patch availability is unknown" ;;
+          "") extra="$extra
+             update: uv reports no downloadable patch for this interpreter family" ;;
+          *) extra="$extra
+             update: available patch: $latest; newest installed patch: $newest; patch availability is not a vulnerability verdict" ;;
+        esac
+        if [ "$patch_available" -eq 1 ] || [ "$selected" -eq 1 ] || { [ "$needs_update" -eq 1 ] && ver_ge "$pv" "$newest"; }; then
+          plan_uv_python "$minor" "$latest"
+          if [ "$selected" -eq 1 ]; then
+            plan_uv_python "$minor" "$newest"
+            extra="$extra
+             preferred: still selects this older patch despite $newest being installed; update remains scheduled"
+          fi
+          fixc "uv python upgrade $minor; then re-audit linked environments"
+          fix "Upgrade the managed interpreter with uv: uv python upgrade $minor"
+        elif ! ver_ge "$pv" "$newest"; then
+          extra="$extra
+             retained: older patch kept beside $newest; upgrading the preferred runtime cannot remove this retained installation"
+        fi
+      fi
+    fi
+    report "$tool" "$p" "$pv" "$vc" "$vn" "$res" "$extra"
+    if [ "$VERBOSE" -eq 0 ] && [ "$patch_available" -eq 1 ]; then
+      printf '  uv Python patch update available: %s to %s; offered by --fix --only=uvpython\n' "$pv" "$latest"
+    fi
+  done <<EOF_PYTHONS
+$cands
+EOF_PYTHONS
   [ "$found" -eq 0 ] && audit_none
 }
 
@@ -2431,7 +2664,346 @@ fix_uv() {
     fx_bad "uv reports $newv, still behind $UV_FIXED (the update may not have happened) - the binary still works"
     FAILED_N=$((FAILED_N + 1))
   fi
-  fx_say "Note: this upgrades uv only. Python versions and tools that uv manages (uv python / uv tool) are not upgraded."
+  fx_say "Note: this step upgrades uv only. Python versions and tools are handled separately by --only=uvpython and --only=uvtools."
+}
+
+# ---- uv managed Python and tool environments
+
+# Do not fetch repair packages through uv's affected TLS implementation. Re-read
+# the actual executable here because a full fix may have just updated uv itself.
+uv_fix_ready() {
+  local v
+  v=$(version_of uv "$UV_BIN")
+  if ! [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! ver_ge "$v" "$UV_FIXED"; then
+    fx_bad "uv ${v:-unknown} cannot safely perform these downloads; upgrade uv itself first to $UV_FIXED or later"
+    return 1
+  fi
+  return 0
+}
+
+# A successful upgrade must protect every Python trust path that can be probed.
+# Unlike the audit summary, an inconclusive component cannot pass verification.
+verify_uv_python() {
+  local p=$1 minor=$2 minimum=${3:-} info cf pip mode out res
+  UV_VERIFY_REASON=
+  info=$(run_to 40 "$p" -I -B "$TMP/py_probe.py" info 2>/dev/null) || { UV_VERIFY_REASON="Python metadata could not be read"; return 1; }
+  UV_VERIFY_VERSION=$(printf '%s\n' "$info" | sed -n 's/^pyver=//p')
+  if [ "${UV_VERIFY_VERSION%.*}" != "$minor" ] || ! printf '%s\n' "$info" | grep -qx 'implementation=cpython'; then
+    UV_VERIFY_REASON="Python minor version or implementation changed unexpectedly"; return 1
+  fi
+  if [ -n "$minimum" ] && ! ver_ge "$UV_VERIFY_VERSION" "$minimum"; then
+    UV_VERIFY_REASON="selected Python $UV_VERIFY_VERSION is older than the available patch $minimum"; return 1
+  fi
+  cf=$(printf '%s\n' "$info" | sed -n 's/^certifi=//p')
+  pip=$(printf '%s\n' "$info" | sed -n 's/^pip=//p')
+  if [ -n "$cf" ] && ! ver_ge "$cf" 2026.10.19; then
+    UV_VERIFY_REASON="certifi $cf is still older than the fixed release 2026.10.19"; return 1
+  fi
+  if [ -n "$pip" ] && ! ver_ge "$pip" 26.2.2; then
+    UV_VERIFY_REASON="pip $pip is still older than the fixed release 26.2.2"; return 1
+  fi
+  for mode in default ${cf:+certifi} ${pip:+pip}; do
+    if [ "$mode" = pip ]; then
+      out=$(pip_probe_all "$p")
+    else
+      # BAD_URLS is intentionally a space separated list of probe arguments.
+      # shellcheck disable=SC2086
+      out=$(run_to 40 "$p" -I -B "$TMP/py_probe.py" "$mode" "$CONTROL_URL" $BAD_URLS 2>/dev/null)
+    fi
+    res=$(printf '%s\n' "$out" | judge)
+    if [ "$res" != rejected ]; then
+      UV_VERIFY_REASON="$mode TLS probe: $res"; return 1
+    fi
+  done
+  return 0
+}
+
+# Verify the existing standard launchers as well as uv's selected interpreter.
+# An installed new patch alone is not sufficient if the user's defaults stayed old.
+verify_uv_python_launchers() {
+  local p=$1 minor=$2 backup=$3 bindir=$4 expected base suffix alias f current
+  expected=$(resolve "$p")
+  base=$(dirname "$(dirname "$expected")")
+  for alias in python python3 "python$minor"; do
+    [ -L "$backup/bin-links/$alias" ] || continue
+    current="$bindir/$alias"
+    if [ ! -L "$current" ] || [ "$(resolve "$current")" != "$expected" ]; then
+      UV_VERIFY_REASON="Python launcher $current does not select the verified interpreter"; return 1
+    fi
+  done
+  suffix=${base##*/}; suffix=${suffix#cpython-"$UV_VERIFY_VERSION"}
+  alias="cpython-$minor$suffix"
+  if [ -L "$backup/python-links/$alias" ]; then
+    current="$UV_PYTHON_DIR/$alias"
+    if [ ! -d "$current" ] || [ "$(cd -P "$current" && pwd)" != "$base" ]; then
+      UV_VERIFY_REASON="Python minor launcher $current does not select the verified interpreter"; return 1
+    fi
+  fi
+  return 0
+}
+
+# uv uses symlinks for Unix Python aliases and tool entry points. Save only links
+# belonging to this interpreter minor or tool, leaving unrelated executables alone.
+uv_link_matches() {
+  local dest direct parent
+  dest=$(resolve "$1")
+  case $2 in
+    tool)
+      # The entry point itself may be a symlink to the shared Python binary.
+      # Ownership follows its immediate target in the tool environment as well.
+      direct=$(readlink "$1")
+      case $direct in /*) ;; *) direct="$(dirname "$1")/$direct" ;; esac
+      parent=$(cd -P "$(dirname "$direct")" 2>/dev/null && pwd)
+      case "$parent/${direct##*/}" in "$3"/*) return 0 ;; esac
+      case $dest in "$3"/*) return 0 ;; esac ;;
+    python) case $dest in "$UV_PYTHON_DIR"/cpython-"$3".*|"$UV_PYTHON_DIR"/cpython-"$3"-*) return 0 ;; esac ;;
+  esac
+  return 1
+}
+
+uv_save_links() {
+  local dir=$1 backup=$2 kind=$3 target=$4 f
+  mkdir -p "$backup" || return 1
+  for f in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+    [ -L "$f" ] || continue
+    uv_link_matches "$f" "$kind" "$target" || continue
+    cp -pP "$f" "$backup/" || return 1
+  done
+}
+
+uv_restore_links() {
+  local dir=$1 backup=$2 kind=$3 target=$4 f
+  for f in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+    [ -L "$f" ] || continue
+    uv_link_matches "$f" "$kind" "$target" || continue
+    rm "$f" || return 1
+  done
+  for f in "$backup"/* "$backup"/.[!.]* "$backup"/..?*; do
+    [ -L "$f" ] || continue
+    # Do not overwrite a file or link claimed by another tool during the upgrade.
+    if [ -e "$dir/${f##*/}" ] || [ -L "$dir/${f##*/}" ]; then return 1; fi
+    mv "$f" "$dir/" || return 1
+  done
+}
+
+uv_bin_dir() {
+  local dir
+  dir=$(uv_read "$1" dir --bin 2>/dev/null) || return 1
+  dir=$(uv_absolute_dir "$dir") || return 1
+  [ -d "$dir" ] || return 1
+  (cd -P "$dir" && pwd)
+}
+
+uv_storage_device() {
+  stat -c %d "$1" 2>/dev/null || stat -f %d "$1" 2>/dev/null
+}
+
+# Recovery uses renames, so saved originals must stay on the install filesystem.
+# Never follow a substituted backup directory into unrelated storage.
+uv_prepare_backups() {
+  local source=$1 backup_root=$2 original_device backup_device permissions
+  [ ! -L "$backup_root" ] || return 1
+  if [ ! -d "$backup_root" ]; then mkdir -m 700 "$backup_root" || return 1; fi
+  [ -O "$backup_root" ] || return 1
+  permissions=$(stat -c %a "$backup_root" 2>/dev/null || stat -f %Lp "$backup_root" 2>/dev/null) || return 1
+  case $permissions in ""|*[!0-7]*) return 1 ;; esac
+  [ "$((8#$permissions & 0022))" -eq 0 ] || return 1
+  original_device=$(uv_storage_device "$source") || return 1
+  backup_device=$(uv_storage_device "$backup_root") || return 1
+  [ -n "$original_device" ] && [ "$original_device" = "$backup_device" ]
+}
+
+# uv can replace an existing patch directory when a newer build of that same
+# version is available. Link backups alone cannot recover pinned environments.
+uv_save_python_installs() {
+  local minor=$1 backup=$2 d
+  mkdir -p "$backup" || return 1
+  for d in "$UV_PYTHON_DIR"/cpython-"$minor".*; do
+    [ -L "$d" ] && return 1
+    [ -d "$d" ] || continue
+    cp -pR "$d" "$backup/${d##*/}" || return 1
+  done
+}
+
+uv_restore_python_installs() {
+  local backup=$1 d current
+  mkdir -p "$backup/failed-installations" || return 1
+  for d in "$backup/installations"/*; do
+    [ -d "$d" ] || continue
+    current="$UV_PYTHON_DIR/${d##*/}"
+    if [ -e "$current" ] || [ -L "$current" ]; then
+      mv "$current" "$backup/failed-installations/${d##*/}" || return 1
+    fi
+    # Move the saved original back without allocating another full installation.
+    mv "$d" "$current" || return 1
+  done
+}
+
+fix_uv_python() {
+  local minor=$1 bindir backup backup_root p d minimum ok=0
+  UV_VERIFY_REASON=
+  minimum=$(cat "$TMP/uv-python-target-$minor" 2>/dev/null)
+  fx_say "${C_BLD}uv managed Python $minor${C_OFF}"
+  uv_fix_ready || { FAILED_N=$((FAILED_N + 1)); return; }
+  [ -n "$minimum" ] && fx_say "uv catalogue target: $minimum or newer within Python $minor"
+  bindir=$(uv_bin_dir python) || { fx_bad "cannot locate uv's Python executable directory"; FAILED_N=$((FAILED_N + 1)); return; }
+  fx_cmd "$(printf '%q' "$UV_BIN") python upgrade $minor"
+  fx_say "Only the $minor minor line is upgraded. Older patch versions are not uninstalled."
+  fx_say "uv can replace a build of the same patch version; complete original installs and links are backed up."
+  for d in "$UV_PYTHON_DIR"/cpython-"$minor".*; do
+    if [ -L "$d" ]; then fx_bad "symlinked patch installation is not supported: $d"; FAILED_N=$((FAILED_N + 1)); return; fi
+  done
+  fx_say "Pinned environments can keep using an old patch. A Python upgrade alone may not fix certifi or pip."
+  if [ "$DRY" -eq 1 ]; then
+    fx_say "[dry-run] would back up complete interpreter installations and preferred links, upgrade, and verify the selected interpreter's TLS"
+    return
+  fi
+  confirm "Upgrade uv managed Python $minor and verify its TLS behavior?" || { SKIPPED_N=$((SKIPPED_N + 1)); return; }
+  backup_root="$UV_PYTHON_DIR/.emudhra-backups"
+  uv_prepare_backups "$UV_PYTHON_DIR" "$backup_root" || { fx_bad "cannot prepare Python backups on the installation filesystem"; FAILED_N=$((FAILED_N + 1)); return; }
+  backup=$(mktemp -d "$backup_root/python-$minor-$STAMP.XXXXXX") || { FAILED_N=$((FAILED_N + 1)); return; }
+  # Reserve rollback metadata before an upgrade can exhaust the filesystem.
+  if ! mkdir -p "$backup/failed-installations" ||
+     ! printf '%s\n' "$UV_PYTHON_DIR" > "$backup/original-directory"; then
+    fx_bad "could not prepare Python recovery metadata; nothing upgraded"; FAILED_N=$((FAILED_N + 1)); return
+  fi
+  if ! uv_save_python_installs "$minor" "$backup/installations" ||
+     ! uv_save_links "$UV_PYTHON_DIR" "$backup/python-links" python "$minor" ||
+     ! uv_save_links "$bindir" "$backup/bin-links" python "$minor"; then
+    fx_bad "could not back up the original interpreter installations and links; nothing upgraded"; FAILED_N=$((FAILED_N + 1)); return
+  fi
+  if "$UV_BIN" python upgrade "$minor" > "$TMP/uv-update.log" 2>&1; then
+    p=$(uv_read python find --system --managed-python "$minor" 2>/dev/null)
+    if [ -n "$p" ] && verify_uv_python "$p" "$minor" "$minimum" &&
+       verify_uv_python_launchers "$p" "$minor" "$backup" "$bindir"; then ok=1; fi
+  else
+    UV_VERIFY_REASON="uv python upgrade failed"
+  fi
+  tail -6 "$TMP/uv-update.log" | sed 's/^/      /'
+  if [ "$ok" -eq 1 ]; then
+    fx_ok "selected Python $UV_VERIFY_VERSION rejects the compromised chain on all probed Python trust paths"
+    fx_warn "old patch versions remain available; replaced builds are saved in the backup. Re-audit pinned environments."
+    FIXED_N=$((FIXED_N + 1))
+    FIX_NOTES="${FIX_NOTES}  - uv Python $minor original installations and preferred links backed up at $backup"$'\n'
+  else
+    fx_bad "${UV_VERIFY_REASON:-could not find the upgraded interpreter}; restoring the original interpreter installations and links"
+    if uv_restore_python_installs "$backup" &&
+       uv_restore_links "$UV_PYTHON_DIR" "$backup/python-links" python "$minor" &&
+       uv_restore_links "$bindir" "$backup/bin-links" python "$minor"; then
+      fx_say "original interpreter contents and links restored; any new patch installation was retained"
+    else
+      fx_bad "interpreter restoration needs manual attention; backups: $backup"
+    fi
+    FAILED_N=$((FAILED_N + 1))
+  fi
+}
+
+uv_restore_tool() {
+  local dir=$1 bindir=$2 backup=$3
+  # Preserve the failed environment rather than deleting an installation.
+  if [ -e "$dir" ]; then mv "$dir" "$backup/failed-environment" || return 1; fi
+  # The saved original is on the installation filesystem. Avoid a second full
+  # copy when the upgrade itself may have exhausted available space.
+  mv "$backup/environment" "$dir" || return 1
+  uv_restore_links "$bindir" "$backup/bin-links" tool "$dir"
+}
+
+# uv removes entry points at the paths recorded in the install receipt. Ask uv
+# itself to read the receipt; fail closed if a path lies outside the backed-up
+# directory, has an unexpected format, or is now owned by another installation.
+uv_tool_entrypoints_safe() {
+  local name=$1 dir=$2 bindir=$3 listing line path parent active=0 found=0
+  listing=$(uv_read tool list --show-paths 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    case $line in
+      "$name "*) active=1; found=1 ;;
+      '- '*)
+        [ "$active" -eq 1 ] || continue
+        case $line in *' ('*')') path=${line##* (}; path=${path%)} ;; *) return 1 ;; esac
+        case $path in /*) ;; *) return 1 ;; esac
+        parent=$(cd -P "$(dirname "$path")" 2>/dev/null && pwd) || return 1
+        [ "$parent" = "$bindir" ] || return 1
+        if [ -e "$path" ] || [ -L "$path" ]; then
+          [ -L "$path" ] && uv_link_matches "$path" tool "$dir" || return 1
+        fi ;;
+      '') ;;
+      *) active=0 ;;
+    esac
+  done <<EOF_UV_ENTRIES
+$listing
+EOF_UV_ENTRIES
+  [ "$found" -eq 1 ]
+}
+
+fix_uv_tool() {
+  local name=$1 dir bindir backup backup_root p info pv minor base implementation managed_minor target ok=0
+  UV_VERIFY_REASON=
+  fx_say "${C_BLD}uv tool $name${C_OFF}"
+  uv_tool_name_safe "$name" || { fx_bad "unsupported tool name"; FAILED_N=$((FAILED_N + 1)); return; }
+  uv_fix_ready || { FAILED_N=$((FAILED_N + 1)); return; }
+  dir="$UV_TOOLS_DIR/$name"
+  if [ -z "$UV_TOOLS_DIR" ] || [ -L "$dir" ] || [ ! -f "$dir/uv-receipt.toml" ]; then
+    fx_bad "tool environment is missing, symlinked, or has no uv receipt"; FAILED_N=$((FAILED_N + 1)); return
+  fi
+  p="$dir/bin/python"
+  info=$("$p" -I -B "$TMP/py_probe.py" info 2>/dev/null)
+  pv=$(printf '%s\n' "$info" | sed -n 's/^pyver=//p'); minor=${pv%.*}
+  base=$(printf '%s\n' "$info" | sed -n 's/^baseprefix=//p')
+  implementation=$(printf '%s\n' "$info" | sed -n 's/^implementation=//p')
+  if [ "$implementation" != cpython ] || [ -z "$pv" ] || [ -z "$base" ]; then
+    fx_bad "cannot preserve this tool's Python version and implementation automatically"; FAILED_N=$((FAILED_N + 1)); return
+  fi
+  managed_minor=$(uv_managed_minor "$base" "$pv" "$implementation")
+  if [ -n "$managed_minor" ]; then
+    target=$(uv_read python find --system --managed-python "$minor" 2>/dev/null)
+  else
+    # Preserve the exact external interpreter rather than switching package managers.
+    target="$base/bin/python3"
+  fi
+  if [ ! -x "$target" ]; then fx_bad "cannot locate a usable Python $minor interpreter"; FAILED_N=$((FAILED_N + 1)); return; fi
+  bindir=$(uv_bin_dir tool) || { fx_bad "cannot locate uv's tool executable directory"; FAILED_N=$((FAILED_N + 1)); return; }
+  if ! uv_tool_entrypoints_safe "$name" "$dir" "$bindir"; then
+    fx_bad "recorded executable paths differ from the current tool bin directory, or an entry point belongs to another tool"
+    fx_say "Use the original UV_TOOL_BIN_DIR and resolve conflicting executable links before retrying. Nothing upgraded."
+    FAILED_N=$((FAILED_N + 1)); return
+  fi
+  fx_cmd "$(printf '%q' "$UV_BIN") tool upgrade $(printf '%q' "$name") --python $(printf '%q' "$target") --no-python-downloads"
+  fx_say "uv preserves recorded version constraints, sources, extras, and install options. Tool packages and dependencies may upgrade within those constraints."
+  if [ "$DRY" -eq 1 ]; then
+    fx_say "[dry-run] would back up the full environment and its executable links, upgrade, then verify dependencies and Python TLS"
+    return
+  fi
+  confirm "Upgrade uv tool $name with Python $minor, retaining its recorded requirements?" || { SKIPPED_N=$((SKIPPED_N + 1)); return; }
+  # A directory inside UV_TOOLS_DIR is interpreted as an installed tool by uv.
+  backup_root="${UV_TOOLS_DIR}.emudhra-backups"
+  uv_prepare_backups "$UV_TOOLS_DIR" "$backup_root" || { fx_bad "cannot prepare tool backups on the installation filesystem"; FAILED_N=$((FAILED_N + 1)); return; }
+  backup=$(mktemp -d "$backup_root/tool-$name-$STAMP.XXXXXX") || { FAILED_N=$((FAILED_N + 1)); return; }
+  if ! printf '%s\n' "$dir" > "$backup/original-directory"; then
+    fx_bad "could not prepare tool recovery metadata; nothing upgraded"; FAILED_N=$((FAILED_N + 1)); return
+  fi
+  if ! cp -pR "$dir" "$backup/environment" || ! uv_save_links "$bindir" "$backup/bin-links" tool "$dir"; then
+    fx_bad "could not back up the tool and its links; nothing upgraded"; FAILED_N=$((FAILED_N + 1)); return
+  fi
+  if "$UV_BIN" tool upgrade "$name" --python "$target" --no-python-downloads > "$TMP/uv-update.log" 2>&1; then
+    if verify_uv_python "$p" "$minor"; then
+      if uv_read pip check --python "$p" > "$TMP/uv-check.log" 2>&1; then ok=1
+      else UV_VERIFY_REASON="dependency verification failed"; fi
+    fi
+  else
+    UV_VERIFY_REASON="uv tool upgrade failed"
+  fi
+  tail -6 "$TMP/uv-update.log" | sed 's/^/      /'
+  if [ "$ok" -eq 1 ]; then
+    fx_ok "$name dependencies are consistent; its Python trust paths reject the compromised chain"
+    fx_say "Application clients and native binaries have not been probed."
+    FIXED_N=$((FIXED_N + 1))
+    FIX_NOTES="${FIX_NOTES}  - uv tool $name environment and executable links backed up at $backup"$'\n'
+  else
+    fx_bad "${UV_VERIFY_REASON:-verification failed}; restoring the tool environment and executable links"
+    if uv_restore_tool "$dir" "$bindir" "$backup"; then fx_say "original tool environment and links restored"
+    else fx_bad "restoration needs manual attention; backups: $backup"; fi
+    FAILED_N=$((FAILED_N + 1))
+  fi
 }
 
 # ---- rustup (official rustup-init install only)
@@ -2473,12 +3045,30 @@ fix_rustup() {
   fx_say "rustls-webpki >= 0.103.16 and webpki-roots >= 1.0.10 in Cargo.lock (cargo update -p rustls-webpki -p webpki-roots)."
 }
 
+plan_has_kind() {
+  if [ -z "$1" ]; then [ "$PLAN" != $'\n' ]; return; fi
+  case $PLAN in *$'\n'"$1|"*) return 0 ;; esac
+  return 1
+}
+
 # ---- orchestration
 run_fixes() {
   local line kind target ran=0
   section "Fix"
-  if [ "$PLAN" = $'\n' ]; then
-    echo "  Nothing to fix: no affected item has an automated fix."; echo; return 0
+  if ! plan_has_kind "$ONLY"; then
+    case $ONLY in
+      uvpython)
+        echo "  No uv Python upgrade scheduled. Discovered $UV_PYTHON_COUNT managed interpreter installations."
+        echo "  No automatic upgrade could be scheduled for the current installations."
+        echo "  Review retained older patches, unknown results, and unsupported layouts above." ;;
+      uvtools)
+        echo "  No uv tool upgrade scheduled. Discovered $UV_TOOL_COUNT installed tool environments."
+        echo "  No affected or outdated readable environment was found. Review unknown results above." ;;
+      "") echo "  Nothing to fix: no item has an automated upgrade or trust-store fix planned." ;;
+      *) echo "  Nothing matched --only $ONLY." ;;
+    esac
+    echo "  Changed: 0   Failed or refused: 0   Skipped: 0"
+    echo; return 0
   fi
   if [ "$DRY" -eq 1 ]; then
     echo "  DRY RUN - nothing will be changed. Each step below is verified on a copy where possible."
@@ -2493,7 +3083,7 @@ run_fixes() {
   # for everything run inside the loop (brew, keytool, prompts), which is how confirm() once lost its terminal.
   local oldifs=$IFS
   IFS=$'\n'
-  for kind in brew sys java macpip node uv rustup; do
+  for kind in brew sys java macpip node uv uvpython uvtools rustup; do
     for line in $PLAN; do
       IFS=$oldifs
       case $line in "$kind|"*) ;; *) IFS=$'\n'; continue ;; esac
@@ -2507,6 +3097,8 @@ run_fixes() {
         macpip) fix_macos_pip ;;
         node)   fix_node_nvm "$target" ;;
         uv)     fix_uv "$target" ;;
+        uvpython) fix_uv_python "$target" ;;
+        uvtools)  fix_uv_tool "$target" ;;
         rustup) fix_rustup "$target" ;;
       esac
       IFS=$'\n'
@@ -2520,6 +3112,7 @@ run_fixes() {
     echo "  Backups and undo notes:"
     printf '%s' "$FIX_NOTES"
     echo "  Restore system files and JDK stores with: ${0##*/} --undo"
+    echo "  Successful uv upgrades require manual recovery from the printed backups; --undo does not restore them."
   fi
   if [ "$DRY" -eq 0 ] && [ "$FIXED_N" -gt 0 ]; then
     echo "  Re-run the audit to confirm. OS updates may overwrite edited system files."
@@ -2574,7 +3167,7 @@ run_undo() {
     esac
   done
   [ "$any" -eq 0 ] && echo "  No ${BACKUP_TAG} backups found in the usual places."
-  echo "  Homebrew upgrades are not covered by --undo (see the notes printed by --fix)."
+  echo "  Homebrew and uv upgrades are not covered by --undo (see the notes printed by --fix)."
   echo
 }
 

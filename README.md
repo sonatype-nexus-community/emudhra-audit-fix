@@ -92,7 +92,7 @@ protected, and lists the old version under "upgrade when convenient".
 | curl | yes | no | The page lists no fixed curl version; it depends on the CA bundle in use. |
 | git | yes (`git ls-remote`) | no | Uses the OS/curl bundle, so it can differ from other tools. Also reports `http.sslCAInfo` and `http.sslVerify=false`. |
 | Go | yes | yes | Fixed in 1.26.10 and 1.27.3. |
-| Python | yes (default store, `certifi` if installed, and `pip download`) | yes | Checks `certifi` >= 2026.10.19 and `pip` >= 26.2.2. Every interpreter found is checked. |
+| Python, including uv environments | yes, default store, `certifi` if installed, and `pip download` | yes | Checks `certifi` >= 2026.10.19 and `pip` >= 26.2.2. Every interpreter and installed uv tool environment found is checked. |
 | Java (JDK/JRE) | yes, needs a `javac` somewhere on the machine | yes | Every install found is checked. Fixed in 8u511, 11.0.33, 17.0.21, 21.0.13, 25.0.5, 27.0.1. |
 | Node.js | yes (and again with `--use-system-ca` when affected) | yes | Fixed in 22.23.4, 24.22.1, 26.12.1. `--fix --only=node` can upgrade nvm installs; see [Node.js via nvm](#nodejs-via-nvm---onlynode). |
 | Deno | yes | yes | Fixed in 2.9.8. |
@@ -161,9 +161,9 @@ At the end there is a summary count, followed by the remediation guidance.
 | `--fix` | After the audit, offer to apply fixes, asking before each change. See [Applying fixes](#applying-fixes---fix). |
 | `--dry-run` | With `--fix`: run every check and show every step, but change nothing. |
 | `--yes` | With `--fix` or `--undo`: do not ask the ordinary y/N questions (for unattended use). It **never** answers the `I AGREE` prompt that guards deleting a Node.js version. |
-| `--only=KIND` | With `--fix`: apply one kind of fix only: `brew`, `sys`, `java`, `macpip`, `node`, `uv` or `rustup`. |
+| `--only=KIND` | With `--fix`: apply one kind of fix only: `brew`, `sys`, `java`, `macpip`, `node`, `uv`, `uvpython`, `uvtools` or `rustup`. |
 | `--workaround-only` | With `--fix`: skip mention of the vendor package upgrade on Linux. |
-| `--undo` | Restore the backups made by `--fix`. |
+| `--undo` | Restore system and JDK backups. Successful uv upgrades require manual recovery. |
 | `-h`, `--help` | Show usage. |
 
 | Exit code | Meaning |
@@ -217,6 +217,8 @@ release exists; the fixes here distrust two roots, which has side effects.
 | `macpip` | Appends the page's `PIP_CERT` line to Apple's Python `sitecustomize.py`. | yes |
 | `node` | Upgrades a Node.js installed with **nvm** to the fixed release for its own major line (see below). An upgrade, not a trust-store edit. | no |
 | `uv` | Runs `uv self update` for a **standalone** uv install (see below). An upgrade, not a trust-store edit. | no |
+| `uvpython` | Upgrades a uv managed CPython minor line with a pending patch or trust package update, retaining old installs. | no |
+| `uvtools` | Upgrades an affected or outdated installed uv tool within its recorded requirements, then verifies its Python TLS and dependency consistency. | no |
 | `rustup` | Runs `rustup self update` for a rustup installed by the official `rustup-init` (see below). An upgrade, not a trust-store edit. | no |
 
 The two roots are `AAA Certificate Services` (Comodo/Sectigo) and `emSign ECC Root CA - G3`. Nothing else is removed. The
@@ -266,6 +268,92 @@ For a uv behind 0.13.4, `--fix` first works out **how uv was installed**: the st
 - Afterwards it re-reads `uv --version` and compares it with 0.13.4. This is a **version check, not a TLS probe**. If uv
   no longer reports a version, the previous binary is restored.
 - Upgrading uv does not upgrade the Python versions or tools it manages (`uv python`, `uv tool`).
+
+### uv managed Pythons and installed tools
+
+The Python audit asks `uv python dir` and `uv tool dir` for their locations, including custom uv directory settings.
+It discovers managed interpreters that are absent from `PATH`, old retained patch releases, and each installed tool
+with a uv receipt. Interpreter aliases are deduplicated. Separate tool environments are always checked separately,
+even when they share the same Python executable, because their certifi and pip bundles can differ.
+
+Use `-v` to inspect each environment's default SSL, certifi, and pip results. Tool results are labelled `uv tool: NAME Python`.
+These results describe Python trust paths. They do not prove that an application's own HTTP client or a native binary
+uses the same trust store. Disposable `uvx` cache environments and project virtual environments are outside this scope.
+Discovery runs offline with a private cache and cannot download Python. An unreadable tool environment or failed uv
+directory query is reported as unknown rather than silently counted as protected.
+
+Both upgrade modes require a stable uv release at or above `0.13.4`. An older or unrecognized uv executable is
+refused before any upgrade, because repair downloads must not use uv's affected TLS implementation. Upgrade uv itself
+through its installation manager first. Offline environment discovery remains available.
+
+Preview each new fix mode separately:
+
+```bash
+bash emudhra-audit-fix.sh --fix --dry-run --only=uvpython
+bash emudhra-audit-fix.sh --fix --dry-run --only=uvtools
+```
+
+After reviewing the previews, omit `--dry-run` to apply that kind of fix. Each change asks for confirmation.
+`--only=uv` still upgrades only the uv executable. A regular `--fix` also considers the two new kinds.
+Like the existing fix modes, `--only` filters the proposed fixes after the full host audit. It does not filter discovery or checks.
+
+#### Managed Python upgrades, `--only=uvpython`
+
+For ordinary CPython installations with a pending update, the script runs `uv python upgrade MAJOR.MINOR`.
+The planner checks uv's bundled download catalogue offline for newer patches of the installed interpreter family.
+Patch availability is reported separately from the security verdict. Known outdated certifi or pip versions also
+produce upgrade offers when live probes reject the chain, matching the existing Node version upgrade behavior.
+The catalogue belongs to the installed uv version and may be stale. It never requests a new minor line or uninstalls an old interpreter. Free threaded and debug variants and alternative Python
+implementations do not receive this automatic interpreter upgrade.
+
+Complete original patch installation directories, preferred interpreter symlinks, and executable aliases are saved before upgrading. uv can replace an existing patch directory when a newer build of that same patch is available. The interpreter
+selected afterwards must keep the same minor version and reject the compromised chain through every applicable
+Python trust path. It must also reach the previewed patch target, and any installed certifi and pip must meet their
+fixed version floors. Existing `python`, `python3`, and minor version launchers must select the verified interpreter.
+An inconclusive result fails verification. A failed command or verification restores the original
+interpreter contents and links, and retains any newly downloaded patch installation for inspection.
+
+Old patch installations can still be used by environments pinned to their exact paths or versions. They remain in
+the next audit and need review. A retained older patch alone does not schedule another upgrade once the newer patch
+is installed and preferred aliases no longer select the older one. Tools still using the older patch receive separate rebuild offers. A newer interpreter is not evidence that certifi, pip, or an application is protected.
+If the latest runtime still uses an affected system trust store, upgrading Python alone will not fix that store.
+
+#### Installed tool upgrades, `--only=uvtools`
+
+For an affected tool, a tool with outdated certifi or pip, or a tool using an older managed patch when a newer one is
+already installed, the script runs a named `uv tool upgrade` with an explicit interpreter of the same Python minor
+version. A tool using managed Python follows that minor line's preferred interpreter. A tool using an external Python
+keeps its external interpreter. No interpreter is downloaded by the tool upgrade.
+
+uv retains recorded requirements, version constraints, local or Git sources, extras, and installation options.
+Package and dependency versions may change within those constraints. A pin can prevent remediation. The script does
+not bypass the pin or modify tool dependencies with pip. It backs up the complete environment and its executable
+links before invoking uv, then requires successful Python TLS probes, fixed versions of any installed certifi and pip,
+and `uv pip check`. Failed commands, changed Python
+minor versions, inconclusive TLS, or unresolved dependency conflicts restore the environment and links automatically.
+
+The script refuses an upgrade if recorded executable paths belong to a different directory from the current
+`uv tool dir --bin`, or an executable is now owned by another tool. Use the original `UV_TOOL_BIN_DIR` and resolve any
+conflicting tool entrypoints first. Symlinked environment directories are also refused. Avoid concurrent uv installs
+or upgrades while backups and verification are running.
+
+Python backups persist under the Python directory's `.emudhra-backups`. Tool backups are kept beside the tool directory,
+with `.emudhra-backups` appended to its path, so uv does not mistake them for installed tools. The exact location is printed.
+Backup transactions are private and must be on the installation filesystem. Backup roots must belong to the effective
+user and must not allow group or other writes. Symlinked backup roots are refused.
+Tool backups contain `environment` and `bin-links`; Python backups contain `installations`, `python-links`, and `bin-links`.
+They may consume significant disk space.
+
+On failed upgrades, originals and launcher links are moved back instead of copied, so recovery does not need space for
+another full installation. Recovery metadata is prepared before upgrading. The original data then resides at its
+installed path; failed versions remain in the backup for inspection. Successful upgrades retain the original backup.
+`--undo` restores system and JDK backups only. It does not reverse successful uv upgrades. Keep successful upgrade backups
+for manual recovery until you have checked your tools.
+
+Dry runs perform the current audit and preflight checks, and print the upgrade and backup steps. They do not run an
+upgrade or create persistent backups, and cannot predict dependency resolution or the final installed versions.
+
+See [manual uv validation](docs/uv-manual-validation.md) for the inventory, audit, preview, and fix sequence.
 
 ### rustup, official install (`--only=rustup`)
 
@@ -322,6 +410,9 @@ finds. `--undo` also removes the p11-kit blocklist files that `--fix` created. H
 | The confirmation prompt under a real pseudo-terminal, and refusal with no terminal (`tests/test_confirm_prompt.sh`) | Tested. The test fails on the earlier code that lost the terminal. |
 | Node.js via nvm: install, verify, default alias, declined prompts, failed install, unpublished fix, other major (`tests/test_fix_node.sh`) | Tested against a stub nvm with no network, including the `I AGREE` removal gate (exact match, `--yes`, no terminal, kept default and aliased versions, several old versions, failed uninstall, and nvm refusing to remove the active version). The deactivate-then-uninstall sequence was also checked against the real `nvm.sh` in a throwaway `NVM_DIR`. Mutation-checked: twelve deliberate breakages of the script (skipped verification, an unasked default change, a disabled no-fix guard, six ways of weakening the removal gate or its exclusions, per-binary planning, no deactivate, hidden nvm output) each make the tests fail. |
 | Node.js via nvm on a real machine | One real `--fix --only=node` run on macOS with a real nvm: it upgraded 24.16.0 to 24.22.1, verified it, offered the old version for removal behind `I AGREE`, and removed it (after fixing a bug where nvm refused to remove the version active in the calling shell). One machine, one run: it is not covered by the automated tests. |
+| uv environment discovery and fix planners | Isolated fixtures on macOS Bash 3.2 and Linux. Covers separate tool trust packages, aliases, relative directories, no network discovery, incomplete probes, malformed names, and empty plans. |
+| uv environment upgrade and rollback | Isolated fixtures cover failed commands, stale trust packages, dependency conflicts, disk exhaustion, default launchers, and affected uv executable refusal. Real uv integration uses local wheels and synthetic TLS responses on macOS and Linux without network access. |
+| uv upgrades on a real macOS arm64 host | Three managed Python minor lines and nine tools upgraded and verified. One tool pinned to an affected certifi was restored. Independent checks covered runtime versions, default links, all 23 tool dependency sets, and recorded requirements. Application specific network clients were not tested. |
 | `--yes` validation, bad flags | Tested. |
 | The macOS system-bundle edit, `brew` upgrade and Java `cacerts` fix on a real machine | Applied on a real macOS machine (the backups and a follow-up audit confirm it): the affected items then report as protected. This is not covered by the automated tests. |
 | The macOS `macpip` fix | **Not applied for real.** Dry run only. |
@@ -336,7 +427,7 @@ to read what it prints.
 
 - On Debian, Ubuntu, Alpine and Fedora the change is verified **after** it is installed (and rolled back if it fails),
   not on a copy beforehand. The macOS bundle and Java stores are tested on a copy first.
-- `--undo` does not reverse a Homebrew upgrade.
+- `--undo` does not reverse Homebrew or successful uv upgrades.
 - `--fix` needs the live probes to verify its work, so it cannot be combined with `--no-network`.
 - The Alpine and Debian fixes disable the roots in `ca-certificates.conf`; a later `ca-certificates` package upgrade is the
   proper fix and replaces that file.
@@ -344,7 +435,7 @@ to read what it prints.
 ## Requirements and portability
 
 - Bash 3.2 or later, which includes the stock macOS shell. The script avoids newer Bash features.
-- Standard tools: `awk`, `sed`, `grep`, `readlink`, `mktemp`.
+- Standard tools: `awk`, `sed`, `grep`, `readlink`, `mktemp`, and `stat` for uv backup filesystem checks.
 - Network access to `*.we-have-a-problem.com` and `github.com` for live probes. Use `--no-network` if that is not allowed.
 - For the full set of probes, the relevant runtime must be installed. The script uses each tool's own runtime to test
   itself, so it does not need `jq` or any other extra dependency.
@@ -396,6 +487,9 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for details.
 tests/test_strip_roots.sh [BUNDLE]        # root-stripping logic against a real CA bundle (read-only)
 tests/test_confirm_prompt.sh              # --fix prompt under a real pseudo-terminal, using a throwaway JDK copy
 tests/test_fix_node.sh                    # --fix --only=node against a stub nvm (no network, ~8s, never touches ~/.nvm)
+bash tests/test_uv_environments.sh       # uv Python and tool discovery and TLS fixtures, no network
+bash tests/test_fix_uv_environments.sh   # uv environment fix, refusal, and rollback fixtures, no network
+bash tests/test_uv_tool_integration.sh   # real uv with local fixture wheels and isolated directories, no network
 tests/test_fix_uv.sh                      # --fix --only=uv against a stub uv binary (no network, throwaway HOME)
 tests/test_fix_rustup.sh                  # --fix --only=rustup against a stub rustup binary (no network, throwaway HOME)
 tests/test_linux_containers.sh [IMAGE...] # --fix and --undo cycles in throwaway Linux containers (needs Docker)
