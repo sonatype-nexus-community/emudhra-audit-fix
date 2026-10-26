@@ -1,6 +1,6 @@
 # Manual validation of uv environment coverage
 
-Run these commands from the feature worktree. The development tests use disposable directories. The commands below
+The development tests use disposable directories. The commands below
 are for the machine you want to audit and, only after reviewing the previews, update.
 
 ## Compare inventory
@@ -8,7 +8,7 @@ are for the machine you want to audit and, only after reviewing the previews, up
 ```bash
 uv python list --only-installed --all-versions --managed-python
 uv tool list --show-paths --show-python --show-version-specifiers --show-with --show-extras
-bash ./emudhra-audit-fix.sh --no-network -v
+./emudhra-audit-fix --no-network -v
 ```
 
 Expect every unique managed interpreter to appear in the Python section, including versions without a PATH alias.
@@ -22,7 +22,7 @@ check. Their application specific TLS implementation is outside the Python probe
 ## Run the live audit
 
 ```bash
-bash ./emudhra-audit-fix.sh -v
+./emudhra-audit-fix -v
 ```
 
 Inspect the default trust store, certifi, and pip result for each tool. A missing pip module is normal in many uv tool
@@ -32,8 +32,8 @@ The live audit can take several minutes when many interpreters and tools are ins
 ## Review the planned changes
 
 ```bash
-bash ./emudhra-audit-fix.sh --fix --dry-run --only=uvpython
-bash ./emudhra-audit-fix.sh --fix --dry-run --only=uvtools
+./emudhra-audit-fix --fix --dry-run --only=uvpython
+./emudhra-audit-fix --fix --dry-run --only=uvtools
 ```
 
 Both commands perform the full host audit, as the existing fix modes do. `--only` filters the fix phase.
@@ -53,8 +53,8 @@ directories, conflicting entrypoints, or unsupported interpreter configurations 
 ## Apply selective fixes after reviewing the previews
 
 ```bash
-bash ./emudhra-audit-fix.sh --fix --only=uvpython
-bash ./emudhra-audit-fix.sh --fix --only=uvtools
+./emudhra-audit-fix --fix --only=uvpython
+./emudhra-audit-fix --fix --only=uvtools
 ```
 
 Each proposed change asks for confirmation. Review the printed Python version, tool name, and backup location.
@@ -72,7 +72,7 @@ uv tool listing warnings. Keep successful upgrade backups until you have exercis
 ```bash
 uv python list --only-installed --all-versions --managed-python
 uv tool list --show-paths --show-python --show-version-specifiers --show-with --show-extras
-bash ./emudhra-audit-fix.sh -v
+./emudhra-audit-fix -v
 ```
 
 Compare inventory and pins with the first output. Run the ordinary workflows for any upgraded tools. The Python TLS

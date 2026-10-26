@@ -18,7 +18,12 @@
 
 # eMudhra Audit & Fix
 
-`emudhra-audit-fix.sh` checks the developer tools installed on a machine against the
+`emudhra-audit-fix` is a single Go binary for macOS and Linux (amd64 and arm64). It replaces the Bash script, which is kept
+for reference in [`legacy/`](legacy/emudhra-audit-fix.sh) and is no longer maintained.
+
+---
+
+It checks the developer tools installed on a machine against the
 [eMudhra intermediate CA compromise](https://emudhra.we-have-a-problem.com/), and prints guidance for fixing anything
 affected. By default it is **read-only**. With `--fix` it can also apply the fixes it knows about, one confirmed change at
 a time, with backups and automatic rollback.
@@ -26,6 +31,7 @@ a time, with backups and automatic rollback.
 ## Contents
 
 - [Background](#background)
+- [Installing](#installing)
 - [Quick start](#quick-start)
 - [How it decides](#how-it-decides)
 - [Scope](#scope)
@@ -35,6 +41,7 @@ a time, with backups and automatic rollback.
 - [Applying fixes (`--fix`)](#applying-fixes---fix)
 - [Requirements and portability](#requirements-and-portability)
 - [Safety](#safety)
+- [Kinds](#kinds)
 - [Limitations](#limitations)
 - [Keeping it current](#keeping-it-current)
 - [Development](#development)
@@ -48,30 +55,57 @@ that still trusts the chain. The fix is distrust, shipped through browsers, oper
 trust-store packages.
 
 Which of your tools are protected depends on which trust store each one uses (the OS keychain, a bundled CA list, a JDK
-`cacerts`, and so on), so one machine often has a mix of protected and affected tools. This script finds out which is which.
+`cacerts`, and so on), so one machine often has a mix of protected and affected tools. This tool finds out which is which.
 
-The authoritative source is <https://emudhra.we-have-a-problem.com/>. The fixed versions in this script were taken from
+The authoritative source is <https://emudhra.we-have-a-problem.com/>. The fixed versions in this tool were taken from
 that page as of 2026-10-22; check the page for updates.
+
+## Installing
+
+Download the archive for your platform from the [releases page](https://github.com/sonatype-nexus-community/emudhra-dev-tools-fixer/releases)
+and unzip it. Each release has a `SHA256SUMS` file, signed with the project's GPG key (`SHA256SUMS.sig`).
+
+```bash
+gh release download --repo sonatype-nexus-community/emudhra-dev-tools-fixer --pattern '*darwin_arm64*' --pattern '*SHA256SUMS*'
+shasum -a 256 -c --ignore-missing emudhra-dev-tools-fixer_*_SHA256SUMS
+gpg --verify emudhra-dev-tools-fixer_*_SHA256SUMS.sig emudhra-dev-tools-fixer_*_SHA256SUMS
+unzip emudhra-dev-tools-fixer_*_darwin_arm64.zip
+```
+
+The binary is not notarised. Downloading with `gh release download` or `curl` does not set macOS's quarantine flag, so
+Gatekeeper does not object. If you downloaded it in a browser, clear the flag with
+`xattr -d com.apple.quarantine ./emudhra-audit-fix`.
+
+To build it yourself you need the Go toolchain named in `go.mod` (1.26.10 or later; earlier 1.26 releases are affected by
+this very advisory):
+
+```bash
+go build -o emudhra-audit-fix .
+```
+
+Windows is not supported.
 
 ## Quick start
 
 ```bash
-./emudhra-audit-fix.sh              # compact audit with live TLS probes: one line per item
-./emudhra-audit-fix.sh --no-network # version checks only (no connections)
-./emudhra-audit-fix.sh -v           # the full report: path, version and probe result for every item
-./emudhra-audit-fix.sh -vv          # also show the probe commands and raw TLS errors
-./emudhra-audit-fix.sh --fix --dry-run  # show exactly what a fix would do; change nothing
-./emudhra-audit-fix.sh --undo --dry-run # show which backups --undo would restore
-./emudhra-audit-fix.sh --fix --dry-run --only=node  # preview upgrading an nvm-managed Node.js
-./emudhra-audit-fix.sh --fix --dry-run --only=uv    # preview upgrading a standalone uv
-./emudhra-audit-fix.sh --fix --dry-run --only=rustup # preview `rustup self update`
+./emudhra-audit-fix              # compact audit with live TLS probes: one line per item
+./emudhra-audit-fix --no-network # version checks only (no connections)
+./emudhra-audit-fix -v           # the full report: path, version and probe result for every item
+./emudhra-audit-fix -vv          # also show the probe commands and raw TLS errors
+./emudhra-audit-fix --list-kinds # what it can audit and fix, and whether each applies on this machine
+./emudhra-audit-fix --fix --dry-run  # show exactly what a fix would do; change nothing
+./emudhra-audit-fix --undo --dry-run # show which backups --undo would restore
+./emudhra-audit-fix --fix --dry-run --only=node  # preview upgrading an nvm-managed Node.js
+./emudhra-audit-fix --fix --dry-run --only=uv    # preview upgrading a standalone uv
+./emudhra-audit-fix --fix --dry-run --only=rustup # preview `rustup self update`
 ```
 
-No installation is needed. The script is a single file; make it executable with `chmod +x emudhra-audit-fix.sh` if required.
+No installation step is needed beyond putting the binary somewhere you can run it. It never re-runs itself under `sudo`;
+where a fix needs root it runs only that one command with `sudo`, and `sudo` asks for your password itself.
 
 ## How it decides
 
-For each tool it finds, the script runs up to two checks.
+For each tool it finds, the tool runs up to two checks.
 
 1. **Live probe (authoritative).** The tool itself connects to two hosts that chain to the compromised intermediates, plus
    a control host (`https://github.com/`, chosen because it does not depend on either root the page says to distrust).
@@ -82,7 +116,7 @@ For each tool it finds, the script runs up to two checks.
 2. **Version check (explains why).** The tool's version is compared with the fixed releases listed on the page.
 
 The probe wins when the two disagree. For example, Go on macOS can be older than the fixed release but still reject the
-chain, because it uses the macOS system verifier, which already carries Apple's block. The script reports that as
+chain, because it uses the macOS system verifier, which already carries Apple's block. The tool reports that as
 protected, and lists the old version under "upgrade when convenient".
 
 ## Scope
@@ -116,7 +150,7 @@ pyenv, SDKMAN, Homebrew, `/usr/lib/jvm`, `/Library/Java/JavaVirtualMachines` and
 - Perl `Mozilla::CA`, Composer `ca-bundle`, Elixir `castore` and Erlang `certifi`.
 - Containers, per-project virtualenvs and `node_modules`.
 - Electron apps on Windows and Linux.
-- Windows hosts (the script is a Bash script for Unix-like systems).
+- Windows hosts.
 
 ### Environment overrides
 
@@ -164,15 +198,17 @@ At the end there is a summary count, followed by the remediation guidance.
 | `--only=KIND` | With `--fix`: apply one kind of fix only: `brew`, `sys`, `java`, `macpip`, `node`, `uv`, `uvpython`, `uvtools` or `rustup`. |
 | `--workaround-only` | With `--fix`: skip mention of the vendor package upgrade on Linux. |
 | `--undo` | Restore system and JDK backups. Successful uv upgrades require manual recovery. |
+| `--list-kinds` | List every kind of audit and fix, with a one-line description and whether it applies on this host. |
+| `--version` | Print the version and commit. |
 | `-h`, `--help` | Show usage. |
 
 | Exit code | Meaning |
 |---|---|
 | `0` | Nothing affected or likely affected. |
 | `1` | At least one item is affected or likely affected. |
-| `2` | Usage error, or the script could not create its temporary directory. |
+| `2` | Usage error, or the tool could not create its temporary directory. |
 
-The exit codes make the script usable from CI or device management tooling.
+The exit codes make the tool usable from CI or device management tooling. Output is plain text when stdout is not a terminal: no banner and no colour.
 
 ## Remediation guidance
 
@@ -189,7 +225,7 @@ current platform is printed, and only if an affected item needs it.
 Prefer upgrading over the workaround. The workaround removes two widely used roots (`AAA Certificate Services` and
 `emSign ECC Root CA - G3`) from the trust store, which can break legitimate sites that chain to them, and an OS update may
 replace the edited file. Java and Electron apps use their own trust lists, so OS-level workarounds do not help them; they
-need an upgrade. Node.js uses its own bundled list by default; the script tests `--use-system-ca` and says whether it helps
+need an upgrade. Node.js uses its own bundled list by default; the tool tests `--use-system-ca` and says whether it helps
 on your machine. For a Node.js installed with nvm, `--fix --only=node` can do the upgrade for you (see
 [Node.js via nvm](#nodejs-via-nvm---onlynode)).
 
@@ -197,10 +233,10 @@ If no fixed JDK build is available yet, the guidance for a Java install also pri
 `cacerts` and delete the entries for the two roots. It makes Java reject sites chained to those roots, and is undone by
 a JDK upgrade or by restoring the backup. `--fix --only=java` applies it for you, after testing it on a copy.
 
-**Without `--fix` the script never runs any of this guidance.** It only prints it. Read each command before running it; the
+**Without `--fix` the tool never runs any of this guidance.** It only prints it. Read each command before running it; the
 trust-store commands need `sudo`.
 
-After changing anything, run the script again to confirm.
+After changing anything, run the tool again to confirm.
 
 ## Applying fixes (`--fix`)
 
@@ -239,7 +275,7 @@ cleanly if the fixed release is not published yet.
   default is not touched at all, even with `--yes`.
 - **Removing the old, affected version is offered last, behind a deliberate gate.** After a verified upgrade, each older
   version on the same major line is offered for removal one at a time. Because this deletes something, it is not a
-  `y/N` question: the script prints what will be lost (projects pinning that version through `.nvmrc`,
+  `y/N` question: the tool prints what will be lost (projects pinning that version through `.nvmrc`,
   `.node-version`, `engines` or CI scripts; global npm packages installed only under it; that new shells will no longer
   find it; that undoing it means reinstalling the vulnerable version) and you must type exactly `I AGREE`.
   - The answer is compared byte for byte: `y`, `yes`, `i agree`, `I agree`, a leading or trailing space, and empty
@@ -249,11 +285,11 @@ cleanly if the fixed release is not published yet.
     The version just installed, and any newer one, is never offered.
   - Each old version gets its own prompt; agreeing for one does not cover another.
   - nvm refuses to uninstall the version that is **currently active** in your shell, and a script started from a shell
-    that still has the old version active inherits that. The script runs `nvm deactivate` and then `nvm uninstall` in
-    its own subshell (your shell is not affected). If nvm still refuses, the script prints nvm's own message and tells
+    that still has the old version active inherits that. The tool runs `nvm deactivate` and then `nvm uninstall` in
+    its own subshell (your shell is not affected). If nvm still refuses, the tool prints nvm's own message and tells
     you to open a new shell and run `nvm uninstall <old>`.
   - Prefer to do it yourself? Decline and run `nvm uninstall <old>` later in a shell that does not have it active.
-- `nvm` is a shell function, so the script sources `nvm.sh` in a subshell; your shell and nvm configuration are not changed.
+- `nvm` is a shell function, so the tool sources `nvm.sh` in a subshell; your shell and nvm configuration are not changed.
 - Volta, fnm, asdf, mise and Homebrew Node are not handled yet; for those the audit prints the upgrade command.
 
 ### uv, standalone install (`--only=uv`)
@@ -289,8 +325,8 @@ through its installation manager first. Offline environment discovery remains av
 Preview each new fix mode separately:
 
 ```bash
-bash emudhra-audit-fix.sh --fix --dry-run --only=uvpython
-bash emudhra-audit-fix.sh --fix --dry-run --only=uvtools
+./emudhra-audit-fix --fix --dry-run --only=uvpython
+./emudhra-audit-fix --fix --dry-run --only=uvtools
 ```
 
 After reviewing the previews, omit `--dry-run` to apply that kind of fix. Each change asks for confirmation.
@@ -299,7 +335,7 @@ Like the existing fix modes, `--only` filters the proposed fixes after the full 
 
 #### Managed Python upgrades, `--only=uvpython`
 
-For ordinary CPython installations with a pending update, the script runs `uv python upgrade MAJOR.MINOR`.
+For ordinary CPython installations with a pending update, the tool runs `uv python upgrade MAJOR.MINOR`.
 The planner checks uv's bundled download catalogue offline for newer patches of the installed interpreter family.
 Patch availability is reported separately from the security verdict. Known outdated certifi or pip versions also
 produce upgrade offers when live probes reject the chain, matching the existing Node version upgrade behavior.
@@ -321,18 +357,18 @@ If the latest runtime still uses an affected system trust store, upgrading Pytho
 #### Installed tool upgrades, `--only=uvtools`
 
 For an affected tool, a tool with outdated certifi or pip, or a tool using an older managed patch when a newer one is
-already installed, the script runs a named `uv tool upgrade` with an explicit interpreter of the same Python minor
+already installed, the tool runs a named `uv tool upgrade` with an explicit interpreter of the same Python minor
 version. A tool using managed Python follows that minor line's preferred interpreter. A tool using an external Python
 keeps its external interpreter. No interpreter is downloaded by the tool upgrade.
 
 uv retains recorded requirements, version constraints, local or Git sources, extras, and installation options.
-Package and dependency versions may change within those constraints. A pin can prevent remediation. The script does
+Package and dependency versions may change within those constraints. A pin can prevent remediation. The tool does
 not bypass the pin or modify tool dependencies with pip. It backs up the complete environment and its executable
 links before invoking uv, then requires successful Python TLS probes, fixed versions of any installed certifi and pip,
 and `uv pip check`. Failed commands, changed Python
 minor versions, inconclusive TLS, or unresolved dependency conflicts restore the environment and links automatically.
 
-The script refuses an upgrade if recorded executable paths belong to a different directory from the current
+The tool refuses an upgrade if recorded executable paths belong to a different directory from the current
 `uv tool dir --bin`, or an executable is now owned by another tool. Use the original `UV_TOOL_BIN_DIR` and resolve any
 conflicting tool entrypoints first. Symlinked environment directories are also refused. Avoid concurrent uv installs
 or upgrades while backups and verification are running.
@@ -391,26 +427,40 @@ finds. `--undo` also removes the p11-kit blocklist files that `--fix` created. H
   currently chains to `AAA Certificate Services`. Check anything you depend on, such as internal or partner sites.
 - **Updates can undo the change.** An OS update may replace `/etc/ssl/cert.pem`; a JDK upgrade restores the roots; an
   Xcode update replaces Apple's Python directory. Re-run the audit after updating.
-- **Managed devices.** On a Mac enrolled in MDM the script warns you: IT may overwrite these edits or want to apply them
+- **Managed devices.** On a Mac enrolled in MDM the tool warns you: IT may overwrite these edits or want to apply them
   centrally. The page does not recommend the Windows equivalent for enterprise-managed devices, and the same caution
   applies here.
 - **It cannot patch what it cannot see**: Electron apps, bundled runtimes, containers and CI images need their own updates.
 
 ### What has been tested
 
-| Path | Status |
+There are two layers of evidence, and the second does not yet cover the Go port.
+
+**The Go test suite** (`go test ./...`, run on Linux and macOS in CI). Every fixer is tested against real temporary files
+and directories with stub tools, and the tests assert side effects: the backup that was taken, the bytes that were
+restored, the commands that were (and were not) run. Each failure path is covered: a failing tool, a result that still
+trusts the chain, a refused confirmation, a dry run, a missing prompt terminal, and a failing `sudo`. Guards were
+mutation-checked: each safeguard was deliberately broken and a test had to fail. The audit output was also compared line
+by line with the legacy script's on a macOS arm64 host, compact and `-v`; they match apart from the version, the date and
+the program name.
+
+**Real machines, with the legacy script.** The Go port keeps the script's steps as they were, but the runs below were done
+with `legacy/emudhra-audit-fix.sh`. The Go `--fix` modes have not yet been repeated on real machines; run `--fix --dry-run`
+first and read what it prints.
+
+| Path (script tests are in `legacy/tests/`) | Status |
 |---|---|
-| Root-stripping on a real macOS bundle (`tests/test_strip_roots.sh`) | Tested: exactly the two roots removed, all others unchanged by SHA-256. |
+| Root-stripping on a real macOS bundle (`legacy/tests/test_strip_roots.sh`) | Tested: exactly the two roots removed, all others unchanged by SHA-256. |
 | Java `cacerts`: fix, verify, idempotence, `--undo`, rollback | Tested end to end on a throwaway JDK copy. Restoring gave a byte-identical file. |
-| Debian 12 and Ubuntu 24.04 (`ca-certificates.conf`) | Tested in containers (`tests/test_linux_containers.sh`): affected, fixed, no-op on re-run, undone. |
+| Debian 12 and Ubuntu 24.04 (`ca-certificates.conf`) | Tested in containers (`legacy/tests/test_linux_containers.sh`): affected, fixed, no-op on re-run, undone. |
 | Alpine 3.18 | Tested in a container, same cycle. |
-| Fedora 41 (p11-kit blocklist) | Tested in a container, same cycle. `--undo` removes only the files the script created. |
+| Fedora 41 (p11-kit blocklist) | Tested in a container, same cycle. `--undo` removes only the files the tool created. |
 | OS package version checks (dpkg, apk, rpm) | Tested on Ubuntu, Debian, Alpine 3.18 and 3.20, and Fedora 41. |
 | `--dry-run` on macOS for `sys`, `java`, `brew` and `macpip` | Tested. |
-| The confirmation prompt under a real pseudo-terminal, and refusal with no terminal (`tests/test_confirm_prompt.sh`) | Tested. The test fails on the earlier code that lost the terminal. |
-| Node.js via nvm: install, verify, default alias, declined prompts, failed install, unpublished fix, other major (`tests/test_fix_node.sh`) | Tested against a stub nvm with no network, including the `I AGREE` removal gate (exact match, `--yes`, no terminal, kept default and aliased versions, several old versions, failed uninstall, and nvm refusing to remove the active version). The deactivate-then-uninstall sequence was also checked against the real `nvm.sh` in a throwaway `NVM_DIR`. Mutation-checked: twelve deliberate breakages of the script (skipped verification, an unasked default change, a disabled no-fix guard, six ways of weakening the removal gate or its exclusions, per-binary planning, no deactivate, hidden nvm output) each make the tests fail. |
+| The confirmation prompt under a real pseudo-terminal, and refusal with no terminal (`legacy/tests/test_confirm_prompt.sh`) | Tested. The test fails on the earlier code that lost the terminal. |
+| Node.js via nvm: install, verify, default alias, declined prompts, failed install, unpublished fix, other major (`legacy/tests/test_fix_node.sh`) | Tested against a stub nvm with no network, including the `I AGREE` removal gate (exact match, `--yes`, no terminal, kept default and aliased versions, several old versions, failed uninstall, and nvm refusing to remove the active version). The deactivate-then-uninstall sequence was also checked against the real `nvm.sh` in a throwaway `NVM_DIR`. Mutation-checked: twelve deliberate breakages of the script (skipped verification, an unasked default change, a disabled no-fix guard, six ways of weakening the removal gate or its exclusions, per-binary planning, no deactivate, hidden nvm output) each make the tests fail. |
 | Node.js via nvm on a real machine | One real `--fix --only=node` run on macOS with a real nvm: it upgraded 24.16.0 to 24.22.1, verified it, offered the old version for removal behind `I AGREE`, and removed it (after fixing a bug where nvm refused to remove the version active in the calling shell). One machine, one run: it is not covered by the automated tests. |
-| uv environment discovery and fix planners | Isolated fixtures on macOS Bash 3.2 and Linux. Covers separate tool trust packages, aliases, relative directories, no network discovery, incomplete probes, malformed names, and empty plans. |
+| uv environment discovery and fix planners | Isolated fixtures on macOS and Linux. Covers separate tool trust packages, aliases, relative directories, no network discovery, incomplete probes, malformed names, and empty plans. |
 | uv environment upgrade and rollback | Isolated fixtures cover failed commands, stale trust packages, dependency conflicts, disk exhaustion, default launchers, and affected uv executable refusal. Real uv integration uses local wheels and synthetic TLS responses on macOS and Linux without network access. |
 | uv upgrades on a real macOS arm64 host | Three managed Python minor lines and nine tools upgraded and verified. One tool pinned to an affected certifi was restored. Independent checks covered runtime versions, default links, all 23 tool dependency sets, and recorded requirements. Application specific network clients were not tested. |
 | `--yes` validation, bad flags | Tested. |
@@ -434,23 +484,24 @@ to read what it prints.
 
 ## Requirements and portability
 
-- Bash 3.2 or later, which includes the stock macOS shell. The script avoids newer Bash features.
-- Standard tools: `awk`, `sed`, `grep`, `readlink`, `mktemp`, and `stat` for uv backup filesystem checks.
+- macOS or Linux, on amd64 or arm64. The binary is statically linked and needs no shell, interpreter or extra library.
 - Network access to `*.we-have-a-problem.com` and `github.com` for live probes. Use `--no-network` if that is not allowed.
-- For the full set of probes, the relevant runtime must be installed. The script uses each tool's own runtime to test
+- For the full set of probes, the relevant runtime must be installed. The tool uses each tool's own runtime to test
   itself, so it does not need `jq` or any other extra dependency.
   - Java probes need a `javac` somewhere on the machine to compile the probe once. Without one, Java installs are
     checked by version only.
   - Testing CA bundle files and Homebrew's bundle uses a Python 3.8 or later interpreter found by the audit.
+- `sudo` for the fixes that edit system files. Nothing else needs privileges.
 
-Tested on macOS (Apple silicon) with Bash 3.2, and on Debian 12, Ubuntu 24.04, Alpine 3.18/3.20 and Fedora 41 in arm64
-containers. The BSDs, openSUSE, Arch, NixOS, RHEL-family distributions other than Fedora, and x86-64 Linux have **not** been
-exercised; see [What has been tested](#what-has-been-tested). The macOS workaround edits `/etc/ssl/cert.pem`; reports
-differ on whether macOS updates refresh that file, so re-run the audit after updating rather than assuming.
+CI builds and tests on Linux (amd64) and macOS (arm64). The legacy script's container tests covered Debian 12, Ubuntu 24.04,
+Alpine 3.18/3.20 and Fedora 41 on arm64; the BSDs, openSUSE, Arch, NixOS, RHEL-family distributions other than Fedora, and
+x86-64 Linux have **not** been exercised against real systems; see [What has been tested](#what-has-been-tested). The macOS
+workaround edits `/etc/ssl/cert.pem`; reports differ on whether macOS updates refresh that file, so re-run the audit after
+updating rather than assuming.
 
 ## Safety
 
-- Without `--fix` the script is read-only. It does not install, change or delete anything on the machine. See
+- Without `--fix` the tool is read-only. It does not install, change or delete anything on the machine. See
   [Applying fixes](#applying-fixes---fix) for what `--fix` does.
 - It writes small probe programs (Python, Go, Java, Node.js, Deno, Bun) into a private temporary directory and removes it
   on exit. Go probes run with `GOTOOLCHAIN=local` so Go does not download another toolchain, and Python runs in isolated
@@ -469,49 +520,66 @@ differ on whether macOS updates refresh that file, so re-run the audit after upd
 - **Embedded runtimes cannot be probed.** Electron apps and tools such as rustup, uv, pixi, mise and Claude Code are
   version-checked only.
 - **Per-project dependencies are not scanned.**
-- The script reports the machine it runs on; it does not scan remote hosts.
+- The tool reports the machine it runs on; it does not scan remote hosts.
+
+## Kinds
+
+Each class of tool is a **kind**: one package under `internal/kinds/` that knows how to find installs, audit them and, for
+some, fix them. `--list-kinds` prints them, and the registry in `internal/registry` is their single list.
+
+| Kind | Audits | Fix (`--only=`) |
+|---|---|---|
+| `curl`, `git`, `golang`, `deno`, `bun` | yes | |
+| `python` | yes, including uv Pythons and uv tool environments | |
+| `java` | yes | `java` |
+| `node` | yes | `node` |
+| `rustup` | yes (version only) | `rustup` |
+| `uv` | yes (version only) | `uv` |
+| `pixi`, `mise`, `claudecode` | yes (version only) | |
+| `brew` | yes | `brew` |
+| `sysbundle` | yes | `sys` (macOS) |
+| `ospkg` | yes | `sys` (Linux) |
+| `electron` | yes (macOS) | |
+| `uvpython`, `uvtools` | no: the `python` kind asks for them | `uvpython`, `uvtools` |
+| `macpip` | no: the `python` kind asks for it | `macpip` |
+
+A kind that does not apply on the machine (for example `ospkg` on macOS) is reported as "not applicable" and skipped.
 
 ## Keeping it current
 
-The fixed versions are hard-coded near the check for each tool (search for `check_*_version`, `vcmp` and
-`audit_simple` in `emudhra-audit-fix.sh`). When the page changes, for example when Bun or Erlang `certifi` ship a fix, update
-those values and the `VERSION_OF_SCRIPT` number.
+The fixed versions come from the reference page and live in the code, not in configuration:
+
+- `internal/advisory` holds the two roots and the fixed versions shared by several kinds, and the Go release lines.
+- Kinds with their own release lines keep them beside the check: `internal/kinds/node`, `java`, `python` (certifi and
+  pip), `electron`, and the version-only tools (`rustup`, `uv`, `pixi`, `mise`, `claudecode`).
+
+When the page changes, for example when Bun or Erlang `certifi` ship a fix, update those values and the matching tests,
+then add an entry to [CHANGELOG.md](CHANGELOG.md).
 
 ## Development
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for details.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for the workflow and [ARCHITECTURE.md](./ARCHITECTURE.md) for how it fits together.
 
 ### Tests
 
 ```bash
-tests/test_strip_roots.sh [BUNDLE]        # root-stripping logic against a real CA bundle (read-only)
-tests/test_confirm_prompt.sh              # --fix prompt under a real pseudo-terminal, using a throwaway JDK copy
-tests/test_fix_node.sh                    # --fix --only=node against a stub nvm (no network, ~8s, never touches ~/.nvm)
-bash tests/test_uv_environments.sh       # uv Python and tool discovery and TLS fixtures, no network
-bash tests/test_fix_uv_environments.sh   # uv environment fix, refusal, and rollback fixtures, no network
-bash tests/test_uv_tool_integration.sh   # real uv with local fixture wheels and isolated directories, no network
-tests/test_fix_uv.sh                      # --fix --only=uv against a stub uv binary (no network, throwaway HOME)
-tests/test_fix_rustup.sh                  # --fix --only=rustup against a stub rustup binary (no network, throwaway HOME)
-tests/test_linux_containers.sh [IMAGE...] # --fix and --undo cycles in throwaway Linux containers (needs Docker)
+go build ./...
+go vet ./...
+go test ./...            # the whole suite: no network, no sudo, nothing outside temporary directories
+go test ./... -race
 ```
 
-`test_confirm_prompt.sh` needs `python3` and a JDK with `keytool`. `test_linux_containers.sh` mounts the repository
-read-only and removes each container afterwards.
-
-Three environment variables exist **for tests only** and are not meant for normal use:
-
-- `EMUDHRA_JAVA_HOMES` (space-separated paths) replaces JDK discovery, so a fix can be pointed at a copy instead of a
-  real JDK.
-- `EMUDHRA_NODE_BINS` does the same for Node.js.
-- `EMUDHRA_AUDIT_ONLY=node` (or `curl`, `git`, `python`, ...) runs just that one audit, so a test of one fix does not
-  wait on live probes of every other tool.
+The tests are hermetic: they use temporary `HOME` and `PATH`, stub tools and fakes, and never touch your real nvm, uv,
+JDKs or trust stores. `internal/boundaries` also fails the build if code outside the owning package runs commands,
+mentions `sudo`, or opens `/dev/tty`.
 
 ### Releasing
 
-1. Update `VERSION_OF_SCRIPT` in `emudhra-audit-fix.sh`, and the fixed versions if the reference page has changed.
-2. Run the tests above and check the README still matches the behaviour.
-3. Commit, then tag and push: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
-4. Create the GitHub release with `gh release create vX.Y.Z`, attaching `emudhra-audit-fix.sh`.
+1. Update the fixed versions if the reference page has changed, and add the release to `CHANGELOG.md`.
+2. Run the tests and check this README still matches the behaviour.
+3. Tag and push: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
+4. The release workflow runs GoReleaser: it builds darwin and linux for amd64 and arm64, writes the checksums, signs them with
+   the project's GPG key and publishes the GitHub release.
 
 ## The Fine Print
 
