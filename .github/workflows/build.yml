@@ -1,0 +1,79 @@
+name: Build & Test
+
+on:
+    push:
+        branches:
+            - main
+        paths-ignore:
+            - 'README.md'
+    pull_request:
+        paths-ignore:
+            - 'README.md'
+    workflow_dispatch:
+
+env:
+    LC_APPLICATION_ID: emudhra-dev-tools-fixer
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+              with:
+                  go-version-file: 'go.mod'
+
+            - name: golangci-lint
+              uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+              with:
+               version: v2.13.2
+
+            - name: Build
+              run: |
+                  go build -ldflags='-s -w' ./...
+
+            - name: Test
+              run: go test ./...
+
+            - name: Vet
+              run: go vet ./...
+
+    test-macos:
+        name: Test (macOS)
+        runs-on: macos-latest
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+              with:
+                  go-version-file: 'go.mod'
+
+            - name: Test
+              run: go test ./...
+
+    sonatype:
+        name: Sonatype Lifecycle
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            - name: Checkout Code
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+            - name: Setup Go
+              uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+              with:
+                  go-version-file: 'go.mod'
+
+            - name: Generate go.list
+              run: go list -f '{{define "M"}}{{.Path}} {{.Version}}{{end}}{{with .Module}}{{if not .Main}}{{if .Replace}}{{template "M" .Replace}}{{else}}{{template "M" .}}{{end}}{{end}}{{end}}' -compiled -deps| sort -u > go.list
+
+            - name: Sonatype Lifecycle Evaluation
+              id: evaluate
+              uses: sonatype/actions/evaluate@v1
+              with:
+                  iq-server-url: ${{ vars.SONATYPE_PLATFORM_URL }}
+                  username: ${{ secrets.SONATYPE_LIFECYCLE_USERNAME }}
+                  password: ${{ secrets.SONATYPE_LIFECYCLE_PASSWORD }}
+                  application-id: ${{ env.LC_APPLICATION_ID }}
+                  scan-targets: 'go.list'
