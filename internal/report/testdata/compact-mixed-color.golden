@@ -1,0 +1,15 @@
+[1m[31m[AFFECTED][0m node 22.0.0  [2m~/.nvm/versions/node/v22.0.0/bin/node[0m  - trusts the compromised chain; also behind (fixed in 22.23.4)
+[1m[31m[LIKELY-AFFECTED][0m go 1.26.4  [2m/usr/local/go/bin/go[0m  - version-only: fixed in 1.26.10
+[1m[32m[OK][0m curl 8.7.1  [2m/usr/bin/curl[0m  - rejects the chain
+[1m[32m[LIKELY-OK][0m claude 2.1.309  [2m~/.local/bin/claude[0m  - version-only: fixed in 2.1.303
+[1m[32m[OK][0m uv 0.13.0  [2m~/.local/bin/uv[0m  - rejects the chain, but older than the fixed release (fixed in 0.13.4)
+[1m[33m[UNKNOWN][0m python   [2m/usr/bin/python3[0m  - control host unreachable
+[1mSummary:[0m [31m2 affected[0m, [32m3 ok[0m, [33m1 unknown[0m   (-v for the full report)
+
+[1m[31mFix first[0m (nothing has been run; -v shows full commands)
+  - node 22.0.0: (no specific guidance - see https://emudhra.we-have-a-problem.com/)
+  - go 1.26.4: (no specific guidance - see https://emudhra.we-have-a-problem.com/)
+
+[1m[33mProtected, but older than the fixed release[0m
+  - uv 0.13.0: (no specific guidance - see https://emudhra.we-have-a-problem.com/)
+

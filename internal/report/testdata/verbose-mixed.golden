@@ -1,0 +1,59 @@
+[AFFECTED] node 22.0.0
+    path:    /home/me/.nvm/versions/node/v22.0.0/bin/node
+    version: BEHIND - fixed in 22.23.4
+    probe:   AFFECTED - connected to a host using the compromised chain
+
+[LIKELY-AFFECTED] go 1.26.4
+    path:    /usr/local/go/bin/go
+    version: BEHIND - fixed in 1.26.10
+    probe:   skipped (--no-network)
+
+[OK] curl 8.7.1
+    path:    /usr/bin/curl
+    version: n/a
+    probe:   protected - certificate rejected
+
+[LIKELY-OK] claude 2.1.309
+    path:    /home/me/.local/bin/claude
+    version: up to date - fixed in 2.1.303
+    probe:   skipped (--no-network)
+
+[OK] uv 0.13.0
+    path:    /home/me/.local/bin/uv
+    version: BEHIND - fixed in 0.13.4
+    probe:   protected - certificate rejected
+
+[UNKNOWN] python 
+    path:    /usr/bin/python3
+    version: could not determine
+    probe:   inconclusive - control host unreachable
+
+== Summary ==
+  affected / likely affected: 2
+  ok / likely ok:             3
+  unknown:                    1
+
+Notes: 'AFFECTED'/'OK' come from a live probe. 'LIKELY-*' are version-only.
+Not covered yet: Rust crates in your projects (rustls-webpki, webpki-roots), Perl Mozilla::CA, Composer,
+Elixir/Erlang, containers and per-project virtualenvs/node_modules.
+
+== Remediation guidance ==
+  This is guidance only; nothing below has been run. Commands that edit system trust
+  files need sudo - read them first. Upgrading is better than distrusting roots where it is possible.
+
+Affected - fix these first
+  - node 22.0.0
+    /home/me/.nvm/versions/node/v22.0.0/bin/node
+      (no specific guidance - see https://emudhra.we-have-a-problem.com/)
+
+  - go 1.26.4
+    /usr/local/go/bin/go
+      (no specific guidance - see https://emudhra.we-have-a-problem.com/)
+
+Protected today, but older than the fixed release - upgrade when convenient
+  - uv 0.13.0
+    /home/me/.local/bin/uv
+      (no specific guidance - see https://emudhra.we-have-a-problem.com/)
+
+  After changing anything, re-run this script to confirm.
+
