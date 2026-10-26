@@ -50,7 +50,7 @@ PY
 "$W/bin/audit-fixture" | grep -qx 'fixture tool works'
 cp "$UV_TOOL_DIR/audit-fixture/uv-receipt.toml" "$W/original-receipt"
 mv "$W/staged/"*.whl "$W/wheels/"
-sed '/^# ---* main/,$d' "$HERE/emudhra-audit-fix.sh" > "$W/library.sh"
+sed '/^# ---* main/,$d' "$HERE/../emudhra-audit-fix.sh" > "$W/library.sh"
 # Do not inherit this test's arguments or errexit into the legacy script.
 set +e
 # shellcheck source=/dev/null

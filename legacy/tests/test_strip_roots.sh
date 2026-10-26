@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# Tests the root-stripping logic used by `emudhra-audit-fix.sh --fix` against a CA bundle.
+# Tests the root-stripping logic used by `../emudhra-audit-fix.sh --fix` against a CA bundle.
 # Read-only on the input; writes only to a private temp directory.
 #
 # Usage: tests/test_strip_roots.sh [BUNDLE]     (default: /etc/ssl/cert.pem)
 
 BUNDLE=${1:-/etc/ssl/cert.pem}
 HERE=$(cd "$(dirname "$0")" && pwd)
-SCRIPT="$HERE/../emudhra-audit-fix.sh"
+SCRIPT="$HERE/../../emudhra-audit-fix.sh"
 
 T=$(mktemp -d) || exit 2
 trap 'rm -rf "$T"' EXIT

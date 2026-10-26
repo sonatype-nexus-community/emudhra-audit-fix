@@ -14,7 +14,7 @@
 # the script at it with EMUDHRA_JAVA_HOMES. Needs: python3, a JDK with keytool, and a pristine cacerts source.
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-SCRIPT="$HERE/emudhra-audit-fix.sh"
+SCRIPT="$HERE/../emudhra-audit-fix.sh"
 ONLY=java      # the throwaway JDK exercises the java fix, which is the one with per-item prompts
 
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required"; exit 2; }

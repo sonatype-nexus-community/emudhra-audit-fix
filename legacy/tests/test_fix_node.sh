@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests `emudhra-audit-fix.sh --fix --only=node` (Node.js installed via nvm) without touching the network or
+# Tests `../emudhra-audit-fix.sh --fix --only=node` (Node.js installed via nvm) without touching the network or
 # any real nvm. It builds a throwaway NVM_DIR containing a stub nvm.sh and fake "node" binaries, and checks:
 #
 #   1. happy path     - installs the fixed version beside the old one, verifies it, switches the default
@@ -21,7 +21,7 @@
 # Needs: python3 (for a pseudo-terminal). Never touches the real ~/.nvm.
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-SCRIPT="$HERE/emudhra-audit-fix.sh"
+SCRIPT="$HERE/../../emudhra-audit-fix.sh"
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required"; exit 2; }
 
 W=$(mktemp -d "${TMPDIR:-/tmp}/emudhra-node.XXXXXX") || exit 2

@@ -2,7 +2,7 @@
 # Audit fixtures use fake interpreters and uv, private directories, and no network.
 # Catches omitted managed installs, collapsed venvs, unsafe guidance, and audit mutations.
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-SCRIPT="$HERE/emudhra-audit-fix.sh"
+SCRIPT="$HERE/../emudhra-audit-fix.sh"
 W=$(mktemp -d "${TMPDIR:-/tmp}/emudhra-uv-envs.XXXXXX") || exit 2
 W=$(cd "$W" && pwd -P)
 trap 'rm -rf "$W"' EXIT

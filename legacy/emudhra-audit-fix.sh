@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 #
+# !!! NOT MAINTAINED !!!
+#
+# This bash script has been superseded by a Go implementation.
+# Please use the Go binary from: https://github.com/sonatype-nexus-community/emudhra-dev-tools-fixer/releases
+#
+# This legacy script is retained for reference only and will not receive updates.
+# For the current version, see the releases page above.
+#
+# !!! NOT MAINTAINED !!!
+#
 # emudhra-audit-fix.sh - read-only audit of developer tools against the eMudhra
 # intermediate CA compromise: https://emudhra.we-have-a-problem.com/
 #
@@ -118,6 +128,11 @@ if [ -t 1 ]; then
 else
   C_RED=; C_GRN=; C_YEL=; C_DIM=; C_BLD=; C_OFF=
 fi
+
+# Emit runtime warning about deprecation
+echo "WARNING: This bash script is NOT MAINTAINED. Please use the Go binary from:" >&2
+echo "  https://github.com/sonatype-nexus-community/emudhra-dev-tools-fixer/releases" >&2
+echo >&2
 
 N_BAD=0; N_OK=0; N_UNK=0
 SEEN=$'\n'

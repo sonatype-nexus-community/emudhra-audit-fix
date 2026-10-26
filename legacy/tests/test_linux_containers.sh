@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Exercises `emudhra-audit-fix.sh --fix` / `--undo` inside throwaway Linux containers.
+# Exercises `../emudhra-audit-fix.sh --fix` / `--undo` inside throwaway Linux containers.
 # Nothing on the host is modified: the repository is mounted read-only and each container is removed afterwards.
 #
 # Usage: tests/test_linux_containers.sh [IMAGE ...]
@@ -25,7 +25,7 @@ setup_for() {
 # The in-container scenario. Prints a marker line per step so the host can grade the run.
 scenario() {
   cat <<'EOS'
-S=/src/emudhra-audit-fix.sh
+S=/src/../emudhra-audit-fix.sh
 step() { printf '\n##### %s\n' "$*"; }
 step "1. audit before"
 bash $S -v --no-guidance 2>&1 | sed -n '/^== CA bundle\|^== System CA/,/^== OS CA/p' | grep -E '^\[|probe:|path:' | head -8
