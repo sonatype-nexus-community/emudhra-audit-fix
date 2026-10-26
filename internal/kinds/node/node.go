@@ -225,26 +225,6 @@ func (k *Kind) Audit(ctx context.Context, env *kinds.Env) ([]kinds.Finding, erro
 func (k *Kind) candidates(env *kinds.Env) []string {
 	var patterns []string
 
-	// Testing aid: EMUDHRA_NODE_BINS names a directory of version folders
-	if nodeBins := env.Getenv("EMUDHRA_NODE_BINS"); nodeBins != "" {
-		// List all node binaries under the version folders
-		entries, err := os.ReadDir(nodeBins)
-		if err == nil {
-			for _, entry := range entries {
-				if entry.IsDir() {
-					nodeBin := filepath.Join(nodeBins, entry.Name(), "bin", "node")
-					if discover.Executables([]string{nodeBin}) != nil {
-						patterns = append(patterns, nodeBin)
-					}
-				}
-			}
-		}
-		// Return only these when the testing aid is set
-		if len(patterns) > 0 {
-			return patterns
-		}
-	}
-
 	// PATH lookup
 	if node := discover.Lookup("node", env.Path()); node != "" {
 		patterns = append(patterns, node)
@@ -327,7 +307,7 @@ func (k *Kind) candidates(env *kinds.Env) []string {
 	}
 
 	// Homebrew installations
-	patterns = append(patterns,
+	for _, p := range []string{
 		"/opt/homebrew/opt/node@22/bin/node",
 		"/opt/homebrew/opt/node@24/bin/node",
 		"/opt/homebrew/opt/node@26/bin/node",
@@ -336,13 +316,12 @@ func (k *Kind) candidates(env *kinds.Env) []string {
 		"/usr/local/opt/node@24/bin/node",
 		"/usr/local/opt/node@26/bin/node",
 		"/usr/local/opt/node/bin/node",
-	)
-
-	// System installations
-	patterns = append(patterns,
+		// System installations
 		"/usr/local/bin/node",
 		"/usr/bin/node",
-	)
+	} {
+		patterns = append(patterns, env.Abs(p))
+	}
 
 	return discover.Executables(discover.Candidates(patterns...))
 }

@@ -115,6 +115,9 @@ the highest minimum version per target.
 `kinds.Env` carries every dependency a Kind uses (command runner, probe engine, prompter, privilege escalator, logger, flags,
 temp directory, backup store) so tests can substitute fakes. It reads variables through `Getenv`, `Path()` and `Home()`, which
 honour an injected `Environ` map. A Kind must use those rather than `os.Getenv`, so a test never sees the real machine.
+The fixed system locations a Kind looks at (`/usr/local/bin`, `/usr/lib/jvm`, `/opt/homebrew`) go through `Env.Abs`, which
+prefixes `Env.Root`; `testutil.NewTestEnvT` points `Root` at an empty temporary directory, so the host's own installs are invisible.
+The `node` and `java` Kinds do this today; the rest are listed as exempt in the registry's hermeticity test until they follow.
 
 ### Registry
 

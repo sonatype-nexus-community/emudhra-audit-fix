@@ -179,7 +179,7 @@ func newJDK(t *testing.T, o jdkOpts) *jdk {
 
 	env := testutil.NewTestEnvT(t)
 	env.Run = exec.NewRealRunner()
-	env.Environ = map[string]string{"HOME": dir, "PATH": bin, "EMUDHRA_JAVA_HOMES": home}
+	env.Environ = map[string]string{"HOME": dir, "PATH": bin, "JAVA_HOME": home}
 	for k, v := range o.envVars {
 		env.Environ[k] = v
 	}
@@ -535,7 +535,7 @@ func TestJavaUndo_TheSameJDKReachedTwiceIsRestoredOnce(t *testing.T) {
 	j.writeBackup("20261023120000", "newest|Newest\n")
 	// JAVA_HOME and the replacement list both name it
 	j.env.Environ["JAVA_HOME"] = j.home
-	j.env.Environ["EMUDHRA_JAVA_HOMES"] = j.home + " " + j.home
+	j.env.Environ["JAVA_HOME"] = j.home + " " + j.home
 	pr := prompt.NewFakePrompter()
 	pr.ConfirmResponses = []bool{true, true}
 	j.session.Prompt = pr
@@ -554,7 +554,7 @@ func TestJavaUndo_RestoresEachDifferentJDK(t *testing.T) {
 	otherCacerts := filepath.Join(other, "lib", "security", "cacerts")
 	require.NoError(t, os.WriteFile(otherCacerts, []byte("x|X\n"), 0o644))
 	require.NoError(t, os.WriteFile(otherCacerts+".pre-emudhra-20261023120000", []byte("y|Y\n"), 0o644))
-	j.env.Environ["EMUDHRA_JAVA_HOMES"] = j.home + " " + other
+	linkJDK(t, j, "second", other) // found through ~/.jdks, like any JDK a user keeps there
 	pr := prompt.NewFakePrompter()
 	pr.ConfirmResponses = []bool{true, true}
 	j.session.Prompt = pr
@@ -598,7 +598,8 @@ func TestJavaAudit_OfflineSkipsTheProbe(t *testing.T) {
 
 func TestJavaAudit_NoJDKMeansNoFindings(t *testing.T) {
 	j := newJDK(t, jdkOpts{})
-	j.env.Environ["EMUDHRA_JAVA_HOMES"] = filepath.Join(t.TempDir(), "nowhere")
+	j.env.Environ["JAVA_HOME"] = filepath.Join(t.TempDir(), "nowhere")
+	j.env.Environ["PATH"] = t.TempDir() // no java on the path either
 	findings, err := New().Audit(context.Background(), j.env)
 	require.NoError(t, err)
 	assert.Empty(t, findings)
@@ -606,7 +607,7 @@ func TestJavaAudit_NoJDKMeansNoFindings(t *testing.T) {
 
 func TestJavaAudit_AJDKReachedTwiceIsReportedOnce(t *testing.T) {
 	j := newJDK(t, jdkOpts{})
-	j.env.Environ["EMUDHRA_JAVA_HOMES"] = j.home + " " + j.home
+	linkJDK(t, j, "again", j.home) // the same JDK reached a second way
 	findings, err := New().Audit(context.Background(), j.env)
 	require.NoError(t, err)
 	assert.Len(t, findings, 1)
@@ -629,10 +630,18 @@ func TestJavaAudit_ASymlinkedJDKIsReportedUnderItsRealPath(t *testing.T) {
 	j := newJDK(t, jdkOpts{})
 	link := filepath.Join(filepath.Dir(j.home), "current")
 	require.NoError(t, os.Symlink(j.home, link))
-	j.env.Environ["EMUDHRA_JAVA_HOMES"] = link + " " + j.home
+	j.env.Environ["JAVA_HOME"] = link + " " + j.home
 
 	findings, err := New().Audit(context.Background(), j.env)
 	require.NoError(t, err)
 	require.Len(t, findings, 1, "one JDK, however many names it has")
 	assert.Equal(t, j.home, findings[0].Path, "shown under the directory it resolves to, not as 'current'")
+}
+
+// linkJDK makes dir discoverable as a second JDK, through ~/.jdks.
+func linkJDK(t *testing.T, j *jdk, name, dir string) {
+	t.Helper()
+	jdks := filepath.Join(j.env.Home(), ".jdks")
+	require.NoError(t, os.MkdirAll(jdks, 0o755))
+	require.NoError(t, os.Symlink(dir, filepath.Join(jdks, name)))
 }

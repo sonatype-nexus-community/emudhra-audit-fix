@@ -295,11 +295,6 @@ func (k *Kind) Audit(ctx context.Context, env *kinds.Env) ([]kinds.Finding, erro
 // candidates returns candidate Java home directories.
 // Ports java_candidates from the legacy script (lines 1028-1050).
 func (k *Kind) candidates(env *kinds.Env) []string {
-	// Testing aid: EMUDHRA_JAVA_HOMES replaces normal discovery
-	if homes := env.Getenv("EMUDHRA_JAVA_HOMES"); homes != "" {
-		return strings.Fields(homes)
-	}
-
 	var candidates []string
 
 	// JAVA_HOME
@@ -323,7 +318,7 @@ func (k *Kind) candidates(env *kinds.Env) []string {
 		// But we can't run commands at this stage
 		// Instead, we'll check the standard macOS Java directories
 		for _, d := range []string{
-			"/Library/Java/JavaVirtualMachines",
+			env.Abs("/Library/Java/JavaVirtualMachines"),
 			filepath.Join(env.Home(), "Library/Java/JavaVirtualMachines"),
 		} {
 			matches, _ := filepath.Glob(filepath.Join(d, "*", "Contents", "Home"))
@@ -336,7 +331,7 @@ func (k *Kind) candidates(env *kinds.Env) []string {
 			"/opt/java/*",
 			"/opt/jdk*",
 		} {
-			matches, _ := filepath.Glob(pattern)
+			matches, _ := filepath.Glob(env.Abs(pattern))
 			candidates = append(candidates, matches...)
 		}
 	}
@@ -360,11 +355,11 @@ func (k *Kind) candidates(env *kinds.Env) []string {
 			"/opt/homebrew/opt/openjdk*/libexec/openjdk.jdk/Contents/Home",
 			"/usr/local/opt/openjdk*/libexec/openjdk.jdk/Contents/Home",
 		} {
-			matches, _ := filepath.Glob(pattern)
+			matches, _ := filepath.Glob(env.Abs(pattern))
 			candidates = append(candidates, matches...)
 		}
 	case "linux":
-		matches, _ := filepath.Glob("/home/linuxbrew/.linuxbrew/opt/openjdk*/libexec")
+		matches, _ := filepath.Glob(env.Abs("/home/linuxbrew/.linuxbrew/opt/openjdk*/libexec"))
 		candidates = append(candidates, matches...)
 	}
 

@@ -67,10 +67,10 @@ func TestKindContract(t *testing.T) {
 
 // absolutePathKinds probe fixed absolute locations (for example
 // /usr/local/go, /opt/homebrew, /etc/ssl, /Applications) as the script does.
-// Those are real-filesystem reads that an empty PATH and HOME cannot hide, so
-// these Kinds are exempt from the "finds nothing" check below. A filesystem
-// root that tests can redirect would remove the exemption; until then it is a
-// known gap, listed here so it stays visible.
+// Those are real-filesystem reads that an empty PATH and HOME cannot hide. A Kind that
+// builds those paths with Env.Abs (node and java do) is hidden by Env.Root and is not
+// listed; the rest are exempt from the "finds nothing" check below until they are moved
+// onto Env.Abs too. They are listed here so the gap stays visible.
 var absolutePathKinds = map[string]bool{
 	"golang": true, "brew": true, "sysbundle": true, "ospkg": true, "electron": true,
 	"curl": true, "git": true, // /usr/bin/curl and /usr/bin/git, as the script lists them
@@ -89,6 +89,7 @@ func TestAuditIsHermetic(t *testing.T) {
 			t.Run(k.ID()+"/"+h.OS+"/"+string(h.Family), func(t *testing.T) {
 				env := testutil.NewTestEnvWithHost(h)
 				env.Environ = map[string]string{"PATH": t.TempDir(), "HOME": t.TempDir()}
+				env.Root = t.TempDir() // hides the fixed system locations of Kinds that honour it
 				env.Offline = true
 				findings, err := k.Audit(testutil.Context(), env)
 				require.NoError(t, err)

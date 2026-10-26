@@ -167,5 +167,6 @@ func NewTestEnvT(t testing.TB) *kinds.Env {
 	env := NewTestEnv()
 	_ = os.RemoveAll(env.TempDir)
 	env.TempDir = t.TempDir()
+	env.Root = t.TempDir() // the host's own /usr/local, /opt/homebrew and /usr/lib/jvm are invisible
 	return env
 }

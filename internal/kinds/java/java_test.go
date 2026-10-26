@@ -181,8 +181,8 @@ func TestJavaUndo(t *testing.T) {
 		bakPath := cacertsPath + ".pre-emudhra-20260101120000"
 		require.NoError(t, os.WriteFile(bakPath, []byte("original cacerts"), 0644))
 
-		// Set EMUDHRA_JAVA_HOMES
-		env.Environ["EMUDHRA_JAVA_HOMES"] = javaHome
+		// Point JAVA_HOME at the fake JDK
+		env.Environ["JAVA_HOME"] = javaHome
 
 		var out bytes.Buffer
 		fakePriv := privilege.NewFakeEscalator()
@@ -214,7 +214,7 @@ func TestJavaUndo(t *testing.T) {
 		bakPath := cacertsPath + ".pre-emudhra-20260101120000"
 		require.NoError(t, os.WriteFile(bakPath, []byte("original"), 0644))
 
-		env.Environ["EMUDHRA_JAVA_HOMES"] = javaHome
+		env.Environ["JAVA_HOME"] = javaHome
 
 		var out bytes.Buffer
 		fakePriv := privilege.NewFakeEscalator()
@@ -242,7 +242,7 @@ func TestJavaUndo(t *testing.T) {
 		cacertsPath := filepath.Join(libDir, "cacerts")
 		require.NoError(t, os.WriteFile(cacertsPath, []byte("fake"), 0644))
 
-		env.Environ["EMUDHRA_JAVA_HOMES"] = javaHome
+		env.Environ["JAVA_HOME"] = javaHome
 
 		var out bytes.Buffer
 		fakePriv := privilege.NewFakeEscalator()

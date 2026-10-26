@@ -23,6 +23,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/sonatype-nexus-community/emudhra-dev-tools-fixer/internal/backup"
 	"github.com/sonatype-nexus-community/emudhra-dev-tools-fixer/internal/exec"
@@ -133,6 +134,11 @@ type Env struct {
 	// Environ overrides the process environment for tests: when non-nil,
 	// Getenv reads only from it. Production leaves it nil.
 	Environ map[string]string
+
+	// Root, when not empty, is the directory that stands in for "/" when a Kind looks at the fixed
+	// system locations the script lists (/usr/local/bin, /usr/lib/jvm, /opt/homebrew ...). Production
+	// leaves it empty; a test sets it to a temporary directory so the host's own installs are invisible.
+	Root string
 }
 
 // Getenv returns the value of an environment variable. Kinds must use this,
@@ -146,6 +152,14 @@ func (e *Env) Getenv(key string) string {
 
 // Path returns the PATH to search for executables, as `command -v` would.
 func (e *Env) Path() string { return e.Getenv("PATH") }
+
+// Abs maps a fixed system path (or glob pattern) into Root. With no Root it returns p unchanged.
+func (e *Env) Abs(p string) string {
+	if e.Root == "" {
+		return p
+	}
+	return filepath.Join(e.Root, p)
+}
 
 // Home returns the user's home directory, from HOME.
 func (e *Env) Home() string { return e.Getenv("HOME") }
